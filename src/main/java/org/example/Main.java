@@ -16,6 +16,9 @@ public class Main {
             var javafx = Platform.class.getModule().getDescriptor();
             System.out.println("SQLite FTS5 and RussianAnalyzer started. JavaFX: "
                     + (javafx == null ? "classpath" : javafx.toNameAndVersion()));
+            try (var playwright = MeetingBrowser.startDriver()) {
+                System.out.println("Playwright driver started: " + playwright.chromium().name());
+            }
             return;
         }
         Path directory = data.toAbsolutePath().normalize();

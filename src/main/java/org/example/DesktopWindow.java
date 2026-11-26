@@ -14,14 +14,16 @@ import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
+import org.example.SaluteJazzPage.State;
 
 import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -33,7 +35,7 @@ final class DesktopWindow {
     private final Stage stage = new Stage();
     private final Path data;
     private final LectureLibrary library;
-    private final ExecutorService workers = Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService workers = Executors.newSingleThreadScheduledExecutor();
     private final TextField subject = new TextField();
     private final TextField title = new TextField();
     private final TextField topic = new TextField();
@@ -52,11 +54,14 @@ final class DesktopWindow {
     private final Tab meetingTab;
     private final LibraryPanel libraryPanel;
     private MeetingBrowser browser;
+    private ScheduledFuture<?> browserWatch;
+    private State browserState = State.WAITING_USER;
     private Process capture;
     private String draftId;
     private String activeId;
     private boolean busy;
     private boolean stopped;
+    private boolean captureStartFailed;
     private boolean finishing;
     private boolean finishRequested;
     private boolean closing;
@@ -100,7 +105,10 @@ final class DesktopWindow {
         open.setOnAction(event -> openMeeting());
         save.setOnAction(event -> saveCard());
         reset.setOnAction(event -> clearDraft());
-        start.setOnAction(event -> startCapture());
+        start.setOnAction(event -> startCapture(true));
+        permission.selectedProperty().addListener((value, old, approved) -> {
+            if (!tryStartAutomatically()) buttons();
+        });
         stop.setOnAction(event -> {
             stopped = true;
             recordStop();
@@ -200,6 +208,7 @@ final class DesktopWindow {
         String current = draftId;
         busy = true;
         stopped = false;
+        captureStartFailed = false;
         finishing = false;
         finishRequested = false;
         status.setText("Открываем отдельное окно Chrome");
@@ -215,16 +224,13 @@ final class DesktopWindow {
                     draftId = id;
                     activeId = id;
                     browser = launched;
+                    browserState = State.AUTHENTICATING;
                     busy = false;
                     invitation.clear();
-                    status.setText("Войдите в браузере и подтвердите допуск к встрече");
+                    status.setText("Войдите в браузере и дождитесь допуска к встрече");
                     libraryPanel.refresh(true, id);
-                    launched.process().onExit().thenRun(() -> Platform.runLater(() -> {
-                        if (browser != launched || busy || finishing) return;
-                        if (capture == null && !stopped) status.setText("Окно Chrome закрылось до начала записи");
-                        leaveMeeting();
-                    }));
                     if (closing) leaveMeeting();
+                    else watchBrowser(launched);
                     buttons();
                 });
             } catch (Exception error) {
@@ -246,7 +252,61 @@ final class DesktopWindow {
         else if (detail != null) notice(detail);
     }
 
-    private void startCapture() {
+    private void watchBrowser(MeetingBrowser session) {
+        browserWatch = workers.scheduleWithFixedDelay(new Runnable() {
+            private State previous;
+
+            @Override public void run() {
+                State state = session.observe();
+                boolean confirmed = state != State.IN_CALL || previous == State.IN_CALL;
+                previous = state;
+                if (confirmed) Platform.runLater(() -> {
+                    if (browserState != state) onBrowserState(session, state);
+                });
+            }
+        }, 0, 500, TimeUnit.MILLISECONDS);
+    }
+
+    private void onBrowserState(MeetingBrowser session, State state) {
+        if (browser != session || finishing) return;
+        browserState = state;
+        if (busy) return;
+        if (endIfMeetingClosed()) return;
+        if (capture == null && !stopped) showBrowserState();
+        if (!tryStartAutomatically()) buttons();
+    }
+
+    private void showBrowserState() {
+        status.setText(switch (browserState) {
+            case WAITING_USER -> "Продолжите в Chrome. Если вы уже на встрече, начните запись вручную";
+            case AUTHENTICATING -> "Продолжите в Chrome. Если появится проверка входа, пройдите её вручную";
+            case PREJOIN -> "Подключитесь к встрече в Chrome";
+            case WAITING_ADMISSION -> "Ожидаем допуска организатора";
+            case IN_CALL -> "Допуск подтверждён. Подтвердите разрешение на запись";
+            case RECONNECTING -> "SaluteJazz восстанавливает соединение";
+            case DENIED -> "Организатор отклонил подключение";
+            case ENDED -> "Встреча завершена в SaluteJazz";
+            case CLOSED -> "Окно встречи закрылось";
+        });
+    }
+
+    private boolean endIfMeetingClosed() {
+        if (!closing && browserState != State.ENDED && !browser.process().isAlive()) browserState = State.CLOSED;
+        if (!closing && browserState != State.ENDED && browserState != State.CLOSED) return false;
+        if (!stopped && capture == null && !closing) showBrowserState();
+        if (browserState == State.ENDED) finishRequested = true;
+        leaveMeeting();
+        return true;
+    }
+
+    private boolean tryStartAutomatically() {
+        if (busy || closing || finishing || browser == null || stopped || captureStartFailed || capture != null
+                || browserState != State.IN_CALL || !permission.isSelected()) return false;
+        startCapture(false);
+        return true;
+    }
+
+    private void startCapture(boolean manual) {
         if (!permission.isSelected()) {
             notice("Подтвердите, что получили разрешение на запись.");
             return;
@@ -263,6 +323,15 @@ final class DesktopWindow {
         workers.execute(() -> {
             Path output = null;
             try {
+                State current = session.observe();
+                if ((manual && !current.canStartManually()) || (!manual && current != State.IN_CALL)) {
+                    Platform.runLater(() -> {
+                        busy = false;
+                        onBrowserState(session, current);
+                        if (closing && browser == session && !finishing) leaveMeeting();
+                    });
+                    return;
+                }
                 output = library.startRecording(id).directory();
                 Process process = Capture.start(session.process(), output);
                 Platform.runLater(() -> {
@@ -270,17 +339,17 @@ final class DesktopWindow {
                     busy = false;
                     buttons();
                     libraryPanel.refresh(false, null);
-                    if (closing || !session.process().isAlive()) leaveMeeting();
+                    endIfMeetingClosed();
                 });
                 Thread.startVirtualThread(() -> monitorCapture(id, process));
             } catch (Exception failure) {
                 if (output != null) try { library.finishRecording(id, "EMPTY"); } catch (Exception ignored) { }
                 Platform.runLater(() -> {
                     busy = false;
+                    captureStartFailed = true;
                     status.setText("Захват не запустился");
                     libraryPanel.refresh(false, null);
-                    if (closing || !session.process().isAlive()) leaveMeeting();
-                    else notice("Не удалось запустить модуль записи.");
+                    if (!endIfMeetingClosed()) notice("Не удалось запустить модуль записи.");
                     buttons();
                 });
             }
@@ -302,7 +371,8 @@ final class DesktopWindow {
                     Platform.runLater(() -> {
                         if (capture != process || busy) return;
                         level.setProgress(peak / 32768.0);
-                        status.setText("Идёт запись · " + RecordingPlayer.timestamp(millis));
+                        String connection = browserState == State.RECONNECTING ? " · восстанавливаем соединение" : "";
+                        status.setText("Идёт запись · " + RecordingPlayer.timestamp(millis) + connection);
                     });
                 }
             }
@@ -357,7 +427,8 @@ final class DesktopWindow {
                 busy = false;
                 status.setText(state == null ? "Запись требует восстановления" : exit != 0 ? "Захват прервался" :
                         state.equals("EMPTY") ? "Аудио не получено" : "Запись сохранена в библиотеке");
-                if (finishing || closing || !browser.process().isAlive()) leaveMeeting();
+                if (finishing) leaveMeeting();
+                else endIfMeetingClosed();
                 libraryPanel.refresh(false, null);
                 buttons();
             });
@@ -372,6 +443,10 @@ final class DesktopWindow {
         }
         MeetingBrowser session = browser;
         browser = null;
+        if (browserWatch != null) {
+            browserWatch.cancel(false);
+            browserWatch = null;
+        }
         busy = true;
         buttons();
         workers.execute(() -> {
@@ -385,7 +460,9 @@ final class DesktopWindow {
                     finishing = false;
                     permission.setSelected(false);
                     if (stopped) draftId = null;
-                    if (status.getText().startsWith("Войдите")) status.setText("Встреча завершена");
+                    if (!stopped && browserState != State.CLOSED && browserState != State.ENDED) {
+                        status.setText("Встреча завершена");
+                    }
                     if (closing) completeClose();
                     buttons();
                 });
@@ -399,7 +476,7 @@ final class DesktopWindow {
         open.setDisable(!editing);
         save.setDisable(!editing);
         reset.setDisable(!editing);
-        start.setDisable(!idle || browser == null || stopped || capture != null);
+        start.setDisable(!idle || browser == null || stopped || capture != null || !browserState.canStartManually());
         stop.setDisable(!idle || capture == null);
         leave.setDisable(!idle || browser == null);
         subject.setDisable(!editing);

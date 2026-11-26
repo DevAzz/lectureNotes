@@ -25,7 +25,7 @@ final class Capture {
         throw new IOException("Модуль audio-capture.exe не найден.");
     }
 
-    static Process start(Process browser, Path output) throws IOException {
+    static Process start(ProcessHandle browser, Path output) throws IOException {
         Instant created = browser.info().startInstant()
                 .orElseThrow(() -> new IOException("Время запуска Chrome недоступно."));
         String fileTime = Long.toString(created.toEpochMilli() + FILETIME_EPOCH_OFFSET_MILLIS);

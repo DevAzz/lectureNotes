@@ -32,9 +32,12 @@ if ($AppImage) {
     $packageOptions = @('--type', 'app-image', '--name', 'LectureNotes', '--dest', $distribution,
         '--temp', $temporary, '--input', $appInput, '--main-jar', 'lecture-notes.jar',
         '--main-class', 'org.example.Main', '--module-path', $modulePath,
-        '--add-modules', "java.desktop,java.net.http,java.sql,jdk.httpserver,$fxModules",
+        '--add-modules', "java.desktop,java.net.http,java.sql,jdk.zipfs,$fxModules",
         '--java-options', "--add-modules=$fxModules", '--java-options', $nativeAccess)
     & jpackage @packageOptions
     if ($LASTEXITCODE -ne 0) { throw "Windows packaging failed ($LASTEXITCODE)." }
-    Get-Item -LiteralPath (Join-Path $distribution 'LectureNotes/LectureNotes.exe')
+    $launcher = Join-Path $distribution 'LectureNotes/LectureNotes.exe'
+    $check = Start-Process -FilePath $launcher -ArgumentList '--check' -WindowStyle Hidden -Wait -PassThru
+    if ($check.ExitCode -ne 0) { throw "Packaged application startup check failed ($($check.ExitCode))." }
+    Get-Item -LiteralPath $launcher
 }
