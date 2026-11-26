@@ -51,6 +51,7 @@ final class DesktopWindow extends JFrame {
     private boolean busy;
     private boolean stopped;
     private boolean finishing;
+    private boolean finishRequested;
     private boolean closing;
     private long selectionVersion;
     private boolean filtering;
@@ -100,7 +101,10 @@ final class DesktopWindow extends JFrame {
         open.addActionListener(event -> openMeeting());
         start.addActionListener(event -> startCapture());
         stop.addActionListener(event -> stopCapture());
-        leave.addActionListener(event -> leaveMeeting());
+        leave.addActionListener(event -> {
+            finishRequested = browser.process().isAlive();
+            leaveMeeting();
+        });
         return form;
     }
 
@@ -161,6 +165,7 @@ final class DesktopWindow extends JFrame {
         busy = true;
         stopped = false;
         finishing = false;
+        finishRequested = false;
         status.setText("Открываем отдельное окно Chrome");
         buttons();
         workers.execute(() -> {
@@ -173,7 +178,10 @@ final class DesktopWindow extends JFrame {
                     invitation.setText("");
                     status.setText("Войдите в браузере и подтвердите допуск к встрече");
                     launched.process().onExit().thenRun(() -> onUi(() -> {
-                        if (browser == launched && !busy && !finishing) leaveMeeting();
+                        if (browser == launched && !busy && !finishing) {
+                            if (capture == null && !stopped) status.setText("Окно Chrome закрылось до начала записи");
+                            leaveMeeting();
+                        }
                     }));
                     if (closing) leaveMeeting();
                     buttons();
@@ -284,7 +292,7 @@ final class DesktopWindow extends JFrame {
         recording = null;
         level.setValue(0);
         busy = true;
-        boolean partial = stopped || !finishing || exit != 0;
+        boolean partial = stopped || !finishRequested || exit != 0;
         stopped = true;
         workers.execute(() -> {
             String stored = "PARTIAL";
