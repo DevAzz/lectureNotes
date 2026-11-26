@@ -64,7 +64,9 @@ try {
     $external = Start-Player (Join-Path $work 'out.wav')
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $helper
-    $start.Arguments = "capture $($target.Id) $($target.StartTime.ToFileTimeUtc()) `"$work`""
+    $remainder = 0L
+    $fileTimeMillis = [Math]::DivRem($target.StartTime.ToFileTimeUtc(), 10000L, [ref]$remainder)
+    $start.Arguments = "capture-ms $($target.Id) $fileTimeMillis `"$work`""
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardInput = $true
@@ -97,12 +99,28 @@ try {
     if ($included -lt 100 -or $excluded -gt ($included / 50)) {
         throw "Unexpected signal levels (440 Hz = $included, 997 Hz = $excluded). $eventLog"
     }
+    if ($external.HasExited) { throw 'The control process exited during capture.' }
+
+    $recoveryDir = Join-Path $work 'recovery'
+    New-Item -ItemType Directory -Path $recoveryDir | Out-Null
+    $recovered = Join-Path $recoveryDir $wave.Name
+    $part = $recovered + '.part'
+    $partialWriter = [IO.File]::Open($part, [IO.FileMode]::CreateNew)
+    try {
+        $partialWriter.Write($samples, 0, $samples.Length)
+        $partialWriter.WriteByte(255)
+    } finally { $partialWriter.Dispose() }
+    & $helper 'recover' $recoveryDir
+    if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $recovered).Hash -ne (Get-FileHash -LiteralPath $wave.FullName).Hash) {
+        throw 'WAV recovery failed to restore the intact frames.'
+    }
     [pscustomobject]@{
         WindowsBuild = (Get-ItemProperty 'HKLM:/SOFTWARE/Microsoft/Windows NT/CurrentVersion').CurrentBuild
         Browser = if ($Chrome) { (Get-Item -LiteralPath $chromePath).VersionInfo.ProductVersion } else { 'PowerShell' }
         Pid = $target.Id
         Included440Hz = [Math]::Round($included, 2)
         Excluded997Hz = [Math]::Round($excluded, 2)
+        Recovery = 'Frame-aligned WAV verified'
         Recording = $wave.FullName
     }
 } finally {

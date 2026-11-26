@@ -22,7 +22,7 @@ internal static class Program
             }
             uint pid;
             long creation;
-            if (args.Length != 4 || args[0] != "capture" ||
+            if (args.Length != 4 || (args[0] != "capture" && args[0] != "capture-ms") ||
                 !uint.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out pid) ||
                 pid == 0 || pid > int.MaxValue ||
                 !long.TryParse(args[2], NumberStyles.None, CultureInfo.InvariantCulture, out creation))
@@ -31,7 +31,9 @@ internal static class Program
             {
                 // Keep the validated Windows process object open for the lifetime of capture.
                 var processHandle = target.Handle;
-                if (target.HasExited || target.StartTime.ToFileTimeUtc() != creation || processHandle == IntPtr.Zero)
+                long actual = target.StartTime.ToFileTimeUtc();
+                if (args[0] == "capture-ms") actual /= 10000;
+                if (target.HasExited || actual != creation || processHandle == IntPtr.Zero)
                     return 2;
                 Capture(pid, target, Path.GetFullPath(args[3]));
             }
@@ -52,7 +54,7 @@ internal static class Program
         var stop = new ManualResetEvent(false);
         var control = new Thread(() =>
         {
-            try { while (Console.ReadLine() is string && !stop.WaitOne(0)) { stop.Set(); } }
+            try { Console.ReadLine(); }
             catch (IOException) { }
             finally { stop.Set(); }
         });

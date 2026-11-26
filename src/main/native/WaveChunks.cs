@@ -43,6 +43,7 @@ internal sealed class WaveChunks : IDisposable
         if (stream == null) return;
         try
         {
+            stream.SetLength(44 + bytes);
             stream.Position = 0;
             Header(stream, bytes);
             stream.Flush(true);
@@ -64,12 +65,12 @@ internal sealed class WaveChunks : IDisposable
             using (var partial = new FileStream(file, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
             {
                 long data = partial.Length - 44;
-                if (data < Wasapi.FrameBytes || data > Limit) continue;
+                if (data < Wasapi.FrameBytes) continue;
                 var signature = new byte[12];
                 if (partial.Read(signature, 0, signature.Length) != signature.Length ||
                     Encoding.ASCII.GetString(signature, 0, 4) != "RIFF" ||
                     Encoding.ASCII.GetString(signature, 8, 4) != "WAVE") continue;
-                int aligned = (int)(data / Wasapi.FrameBytes) * Wasapi.FrameBytes;
+                int aligned = (int)(Math.Min(data, Limit) / Wasapi.FrameBytes) * Wasapi.FrameBytes;
                 partial.SetLength(44 + aligned);
                 partial.Position = 0;
                 Header(partial, aligned);
