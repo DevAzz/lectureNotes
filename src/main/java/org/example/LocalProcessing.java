@@ -19,8 +19,6 @@ import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
-import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -43,7 +41,7 @@ final class LocalProcessing {
         var segments = new ArrayList<Segment>();
         for (Recording.Chunk chunk : recording.chunks()) {
             Path checkpoint = recording.directory().resolve(chunk.path().getFileName() + ".srt");
-            // Only publish a complete transcript. A rerun explicitly uses the current model settings.
+            // Retain the engine output for each chunk. The library publishes the completed transcript.
             Path work = Files.createTempDirectory(recording.directory(), "asr-");
             Path input = work.resolve("audio.wav");
             Path output = work.resolve("result");
@@ -72,7 +70,6 @@ final class LocalProcessing {
                 Files.deleteIfExists(work);
             }
         }
-        writeAtomic(recording.directory().resolve("transcript.srt"), srt(segments));
         return List.copyOf(segments);
     }
 
@@ -105,21 +102,7 @@ final class LocalProcessing {
                 + Long.parseLong(parts[2])) * 1000 + Long.parseLong(parts[3]);
     }
 
-    private static String srt(List<Segment> segments) {
-        var text = new StringBuilder();
-        for (int index = 0; index < segments.size(); index++) {
-            Segment item = segments.get(index);
-            text.append(index + 1).append('\n').append(srtTime(item.start())).append(" --> ")
-                    .append(srtTime(item.end())).append('\n').append(item.text()).append("\n\n");
-        }
-        return text.toString();
-    }
-
-    private static String srtTime(long millis) {
-        return RecordingPlayer.timestamp(millis) + String.format(Locale.ROOT, ",%03d", millis % 1000);
-    }
-
-    static String generate(Recording recording, List<Segment> segments, URI base, String model, String focus)
+    static String generate(String topic, List<Segment> segments, URI base, String model, String focus)
             throws Exception {
         if (segments.isEmpty()) throw new IOException("Нет распознанных реплик.");
         URI endpoint = endpoint(base);
@@ -137,7 +120,7 @@ final class LocalProcessing {
                     После каждого тезиса приведи идентификатор подтверждающей реплики в формате [[S1]], [[S2]] и т. д.
                     Бери идентификаторы из данных. Тема: %s
                     Фокус: %s
-                    """.formatted(recording.title(), focus);
+                    """.formatted(topic, focus);
             for (int index = 0; index < segments.size(); index++) {
                 String segment = "S" + (index + 1) + " " + segments.get(index).text() + "\n";
                 if (part.length() + segment.length() > PROMPT_PART_LENGTH && !part.isEmpty()) {
@@ -169,7 +152,6 @@ final class LocalProcessing {
                 links.appendReplacement(output, "[" + RecordingPlayer.timestamp(time) + "](#t=" + time + ")");
             }
             links.appendTail(output);
-            saveNote(recording, output.toString());
             return output.toString();
         }
     }
@@ -197,11 +179,6 @@ final class LocalProcessing {
             throw new IOException("Локальная модель вернула HTTP " + response.statusCode() + ".");
         }
         return Json.completion(response.body());
-    }
-
-    static void saveNote(Recording recording, String value) throws IOException {
-        writeAtomic(recording.directory().resolve("note-" + UUID.randomUUID() + ".md"), value);
-        writeAtomic(recording.directory().resolve("note.md"), value);
     }
 
     static void writeAtomic(Path destination, String body) throws IOException {

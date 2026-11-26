@@ -1,24 +1,19 @@
 package org.example;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.nio.file.StandardOpenOption;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Properties;
-import java.util.UUID;
 import java.util.regex.Pattern;
 
-record Recording(Path directory, String subject, String title, Instant created, String state) {
+record Recording(Path directory) {
     static final int SAMPLE_RATE = 44100;
     private static final Pattern CHUNK_NAME = Pattern.compile("\\d{5}-(\\d{12,})\\.wav");
+    private static final Pattern INCOMPLETE_CHUNK = Pattern.compile("\\d{5}-\\d{12,}\\.wav(?:\\.part)?");
 
     record Chunk(Path path, long startFrame, long frames) {
         long startMillis() { return startFrame * 1000 / SAMPLE_RATE; }
@@ -39,33 +34,17 @@ record Recording(Path directory, String subject, String title, Instant created, 
         return chunks;
     }
 
-    String label() {
-        return subject.isBlank() ? title : subject + " · " + title;
-    }
-
-    void storeState(String value) throws IOException {
-        var properties = Files.exists(directory.resolve("recording.properties")) ? readProperties(directory) : new Properties();
-        properties.setProperty("title", title);
-        properties.setProperty("subject", subject);
-        properties.setProperty("created", created.toString());
-        properties.setProperty("state", value);
-        if (properties.getProperty("permissionAt") == null) {
-            properties.setProperty("permissionAt", created.toString());
-            properties.setProperty("permissionBasis", "Подтверждение пользователя");
-        }
-        Path temporary = Files.createTempFile(directory, "recording-", ".tmp");
-        try {
-            try (var output = Files.newBufferedWriter(temporary, StandardCharsets.UTF_8)) {
-                properties.store(output, null);
+    void clearEmptyChunks() throws IOException {
+        try (var files = Files.list(directory)) {
+            for (Path file : files.toList()) {
+                if (INCOMPLETE_CHUNK.matcher(file.getFileName().toString()).matches() && Files.size(file) < 48) {
+                    Files.deleteIfExists(file);
+                }
             }
-            Files.move(temporary, directory.resolve("recording.properties"),
-                    StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } finally {
-            Files.deleteIfExists(temporary);
         }
     }
 
-    private static Properties readProperties(Path directory) throws IOException {
+    static Properties readProperties(Path directory) throws IOException {
         var properties = new Properties();
         try (var input = Files.newBufferedReader(directory.resolve("recording.properties"), StandardCharsets.UTF_8)) {
             properties.load(input);
@@ -73,53 +52,4 @@ record Recording(Path directory, String subject, String title, Instant created, 
         return properties;
     }
 
-    static final class Library implements AutoCloseable {
-        private final Path root;
-        private final FileChannel lockChannel;
-        private final FileLock lock;
-
-        Library(Path data) throws IOException {
-            root = Files.createDirectories(data.resolve("recordings"));
-            lockChannel = FileChannel.open(data.resolve("library.lock"), StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-            lock = lockChannel.tryLock();
-            if (lock == null) {
-                lockChannel.close();
-                throw new IOException("Библиотека уже открыта в другом экземпляре.");
-            }
-        }
-
-        Recording create(String subject, String title) throws IOException {
-            var recording = new Recording(Files.createDirectory(root.resolve(UUID.randomUUID().toString())),
-                    subject, title, Instant.now(), "RECORDING");
-            recording.storeState(recording.state());
-            return recording;
-        }
-
-        List<Recording> load(boolean recover) throws IOException, InterruptedException {
-            var result = new ArrayList<Recording>();
-            try (var entries = Files.list(root)) {
-                for (Path path : entries.toList()) {
-                    if (!Files.isRegularFile(path.resolve("recording.properties"))) continue;
-                    var properties = readProperties(path);
-                    var recording = new Recording(path, properties.getProperty("subject", ""),
-                            properties.getProperty("title"), Instant.parse(properties.getProperty("created")),
-                            properties.getProperty("state"));
-                    if (recover && (recording.state().equals("RECORDING") || recording.state().equals("STOPPING"))) {
-                        Capture.recover(path);
-                        String state = recording.chunks().isEmpty() ? "EMPTY" : "PARTIAL";
-                        recording.storeState(state);
-                        recording = new Recording(path, recording.subject(), recording.title(), recording.created(), state);
-                    }
-                    result.add(recording);
-                }
-            }
-            result.sort(Comparator.comparing(Recording::created).reversed());
-            return result;
-        }
-
-        @Override public void close() throws IOException {
-            lock.release();
-            lockChannel.close();
-        }
-    }
 }

@@ -14,11 +14,12 @@ public final class ProcessingCheck {
     public static void main(String[] args) throws Exception {
         Path work = Path.of(args[0]);
         Path wav = Path.of(args[1]);
-        try (var library = new Recording.Library(work)) {
-            var recording = library.create("Математика", "Скорость изменения");
+        try (var library = new LectureLibrary(work)) {
+            String lectureId = library.createLecture("Математика", "Скорость изменения", "", "");
+            var recording = library.startRecording(lectureId);
             Files.copy(wav, recording.directory().resolve("00000-000000000000.wav"));
-            recording.storeState("COMPLETE");
-            check(library.load(false).getFirst().chunks().size() == 1, "Published WAV in library");
+            library.finishRecording(lectureId, "COMPLETE");
+            check(library.lecture(lectureId).hasAudio() && recording.chunks().size() == 1, "Published WAV in library");
             Path mono = work.resolve("mono.wav");
             LocalProcessing.convertToWhisperPcm(wav, mono);
             try (var pcm = AudioSystem.getAudioInputStream(mono.toFile())) {
@@ -38,7 +39,8 @@ public final class ProcessingCheck {
                     """, 60_000, 64_000);
             check(segments.size() == 2 && segments.getFirst().start() == 61_500
                     && segments.getLast().end() == 64_000, "SRT timeline with chunk offset");
-            LocalProcessing.saveNote(recording, "Моя первая редакция");
+            long transcriptId = library.saveTranscript(lectureId, segments);
+            library.saveNote(lectureId, transcriptId, "Моя первая редакция", false);
 
             HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 1);
             server.createContext("/v1/chat/completions", exchange -> {
@@ -61,15 +63,13 @@ public final class ProcessingCheck {
             server.start();
             try {
                 URI api = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
-                String generated = LocalProcessing.generate(recording, segments, api, "iq3_s", "");
+                String generated = LocalProcessing.generate("Скорость изменения", segments, api, "iq3_s", "");
+                library.saveNote(lectureId, transcriptId, generated, true);
                 check(generated.contains("[00:01:01](#t=61500)"), "Timestamp rendered from segment");
-                check(Files.readString(recording.directory().resolve("note.md")).equals(generated), "Current note");
-                try (var notes = Files.list(recording.directory())) {
-                    long versions = notes.filter(path -> path.getFileName().toString().startsWith("note-")).count();
-                    check(versions == 2, "Manual edition preserved");
-                }
+                check(library.documents(lectureId).note().markdown().equals(generated), "Current note");
+                check(library.noteVersions(lectureId).size() == 2, "Manual edition preserved");
                 if (args.length == 3) {
-                    String live = LocalProcessing.generate(recording, segments, URI.create(args[2]), "iq3_s", "");
+                    String live = LocalProcessing.generate("Скорость изменения", segments, URI.create(args[2]), "iq3_s", "");
                     check(live.contains("](#t="), "Local model generation with links");
                     System.out.println("Live iq3_s checked.");
                 }

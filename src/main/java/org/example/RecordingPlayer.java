@@ -1,72 +1,57 @@
 package org.example;
 
-import javax.sound.sampled.AudioSystem;
-import javax.sound.sampled.Clip;
-import javax.sound.sampled.FloatControl;
-import javax.sound.sampled.LineEvent;
-import javax.swing.JButton;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import javax.swing.JSlider;
-import javax.swing.SwingUtilities;
-import javax.swing.Timer;
-import java.awt.BorderLayout;
-import java.awt.GridLayout;
+import javafx.geometry.Pos;
+import javafx.scene.control.Button;
+import javafx.scene.control.Label;
+import javafx.scene.control.Slider;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.VBox;
+import javafx.scene.media.Media;
+import javafx.scene.media.MediaPlayer;
+import javafx.util.Duration;
+
 import java.util.List;
 import java.util.function.Consumer;
 
-final class RecordingPlayer extends JPanel {
-    private final JSlider position = new JSlider(0, 0);
-    private final JSlider volume = new JSlider(0, 100, 100);
-    private final JLabel time = new JLabel("—");
-    private final JButton play = new JButton("Воспроизвести");
+final class RecordingPlayer extends VBox {
+    private final Slider position = new Slider(0, 0, 0);
+    private final Slider volume = new Slider(0, 1, 1);
+    private final Label time = new Label();
+    private final Button play = new Button("Воспроизвести");
     private final Consumer<String> error;
-    private final Timer clock;
     private List<Recording.Chunk> chunks = List.of();
-    private Clip clip;
-    private int current;
+    private MediaPlayer player;
     private boolean playing;
     private boolean updating;
-    private long loadVersion;
 
     RecordingPlayer(Consumer<String> error) {
-        super(new BorderLayout(8, 8));
+        super(8);
         this.error = error;
-        var controls = new JPanel(new GridLayout(1, 3, 8, 0));
-        controls.add(play);
-        controls.add(time);
-        var audio = new JPanel(new BorderLayout());
-        audio.add(new JLabel("Громкость"), BorderLayout.WEST);
-        audio.add(volume);
-        controls.add(audio);
-        add(position, BorderLayout.CENTER);
-        add(controls, BorderLayout.SOUTH);
-        play.setEnabled(false);
-        position.setEnabled(false);
-        play.addActionListener(event -> {
+        var controls = new HBox(12, play, time, new Label("Громкость"), volume);
+        controls.setAlignment(Pos.CENTER_LEFT);
+        HBox.setHgrow(volume, Priority.ALWAYS);
+        getChildren().addAll(position, controls);
+        setChunks(List.of());
+        play.setOnAction(event -> {
             if (playing) {
-                loadVersion++;
-                playing = false;
-                if (clip != null) clip.stop();
-                play.setText("Воспроизвести");
-                return;
-            }
-            int start = position.getValue() < position.getMaximum() ? position.getValue() : 0;
-            seek(start, true);
-        });
-        position.addChangeListener(event -> {
-            if (!updating) {
-                showTime();
-                if (!position.getValueIsAdjusting()) seek(position.getValue(), playing);
+                release();
+            } else {
+                double value = position.getValue();
+                seek(value < position.getMax() ? (long) value : 0, true);
             }
         });
-        volume.addChangeListener(event -> applyVolume());
-        clock = new Timer(150, event -> {
-            if (clip != null && playing && !position.getValueIsAdjusting()) {
-                setPosition(chunks.get(current).startMillis() + clip.getMicrosecondPosition() / 1000);
-            }
+        position.valueProperty().addListener((obs, prior, value) -> {
+            if (updating) return;
+            showTime();
+            if (!position.isValueChanging()) seek(value.longValue(), playing);
         });
-        clock.start();
+        position.valueChangingProperty().addListener((obs, prior, changing) -> {
+            if (!changing) seek((long) position.getValue(), playing);
+        });
+        volume.valueProperty().addListener((obs, prior, value) -> {
+            if (player != null) player.setVolume(value.doubleValue());
+        });
     }
 
     void setChunks(List<Recording.Chunk> value) {
@@ -74,11 +59,12 @@ final class RecordingPlayer extends JPanel {
         chunks = value;
         long end = chunks.isEmpty() ? 0 : chunks.getLast().endMillis();
         updating = true;
-        position.setMaximum((int) Math.min(Integer.MAX_VALUE, end));
+        position.setMax(end);
+        position.setValue(0);
         updating = false;
-        setPosition(0);
-        position.setEnabled(end > 0);
-        play.setEnabled(end > 0);
+        position.setDisable(end == 0);
+        play.setDisable(end == 0);
+        showTime();
     }
 
     void seek(long millis, boolean resume) {
@@ -87,68 +73,54 @@ final class RecordingPlayer extends JPanel {
         while (index < chunks.size() - 1 && chunks.get(index).endMillis() <= millis) index++;
         Recording.Chunk chunk = chunks.get(index);
         long actual = Math.clamp(millis, chunk.startMillis(), chunk.endMillis());
-        setPosition(actual);
-        if (!resume) return;
         release();
-        playing = true;
-        play.setText("Пауза");
-        long request = loadVersion;
-        int selected = index;
-        Thread.startVirtualThread(() -> {
-            Clip opened = null;
-            try (var audio = AudioSystem.getAudioInputStream(chunk.path().toFile())) {
-                opened = AudioSystem.getClip();
-                opened.open(audio);
-                Clip ready = opened;
-                SwingUtilities.invokeLater(() -> attach(ready, request, selected, actual - chunk.startMillis()));
-            } catch (Exception failure) {
-                if (opened != null) opened.close();
-                SwingUtilities.invokeLater(() -> {
-                    if (request != loadVersion) return;
-                    release();
-                    error.accept("Не удалось воспроизвести WAV. Проверьте устройство вывода звука.");
-                });
-            }
-        });
-    }
-
-    private void attach(Clip ready, long request, int index, long offset) {
-        if (request != loadVersion) { ready.close(); return; }
-        clip = ready;
-        current = index;
-        ready.setMicrosecondPosition(Math.min(offset * 1000, ready.getMicrosecondLength()));
-        ready.addLineListener(event -> {
-            if (event.getType() != LineEvent.Type.STOP) return;
-            SwingUtilities.invokeLater(() -> {
-                if (ready != clip || !playing || ready.getFramePosition() < ready.getFrameLength()) return;
-                if (current + 1 < chunks.size()) seek(chunks.get(current + 1).startMillis(), true);
+        setPosition(actual);
+        if (!resume || actual >= position.getMax()) return;
+        int next = index + 1;
+        try {
+            var media = new Media(chunk.path().toUri().toASCIIString());
+            var opened = new MediaPlayer(media);
+            player = opened;
+            playing = true;
+            play.setText("Пауза");
+            opened.setVolume(volume.getValue());
+            opened.setStartTime(Duration.millis(actual - chunk.startMillis()));
+            opened.setOnReady(() -> { if (player == opened) opened.play(); });
+            opened.currentTimeProperty().addListener((obs, prior, elapsed) -> {
+                if (player == opened && !position.isValueChanging()) {
+                    setPosition(Math.min(chunk.endMillis(), chunk.startMillis() + (long) elapsed.toMillis()));
+                }
+            });
+            opened.setOnEndOfMedia(() -> {
+                if (player != opened) return;
+                if (next < chunks.size()) seek(chunks.get(next).startMillis(), true);
                 else {
-                    setPosition(position.getMaximum());
+                    setPosition((long) position.getMax());
                     release();
                 }
             });
-        });
-        applyVolume();
-        ready.start();
+            Runnable failed = () -> { if (player == opened) playbackFailed(); };
+            media.setOnError(failed);
+            opened.setOnError(failed);
+        } catch (RuntimeException failure) {
+            playbackFailed();
+        }
     }
 
-    private void applyVolume() {
-        if (clip != null && clip.isControlSupported(FloatControl.Type.MASTER_GAIN)) {
-            var gain = (FloatControl) clip.getControl(FloatControl.Type.MASTER_GAIN);
-            float value = (float) (20 * Math.log10(Math.max(0.00001, volume.getValue() / 100.0)));
-            gain.setValue(Math.clamp(value, gain.getMinimum(), gain.getMaximum()));
-        }
+    private void playbackFailed() {
+        release();
+        error.accept("Не удалось воспроизвести WAV. Проверьте устройство вывода звука.");
     }
 
     private void setPosition(long millis) {
         updating = true;
-        position.setValue((int) Math.min(millis, Integer.MAX_VALUE));
+        position.setValue(millis);
         updating = false;
         showTime();
     }
 
     private void showTime() {
-        time.setText(timestamp(position.getValue()) + " / " + timestamp(position.getMaximum()));
+        time.setText(timestamp((long) position.getValue()) + " / " + timestamp((long) position.getMax()));
     }
 
     static String timestamp(long millis) {
@@ -156,19 +128,17 @@ final class RecordingPlayer extends JPanel {
         return "%02d:%02d:%02d".formatted(seconds / 3600, seconds / 60 % 60, seconds % 60);
     }
 
-    private void release() {
-        loadVersion++;
-        playing = false;
-        if (clip != null) {
-            Clip previous = clip;
-            clip = null;
-            previous.close();
-        }
-        play.setText("Воспроизвести");
+    void close() {
+        release();
     }
 
-    void close() {
-        clock.stop();
-        release();
+    private void release() {
+        playing = false;
+        if (player != null) {
+            MediaPlayer previous = player;
+            player = null;
+            previous.dispose();
+        }
+        play.setText("Воспроизвести");
     }
 }

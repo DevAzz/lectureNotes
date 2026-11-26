@@ -1,15 +1,28 @@
 package org.example;
 
-import javax.swing.*;
-import java.awt.BorderLayout;
-import java.awt.FlowLayout;
-import java.awt.GridLayout;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
+import javafx.application.Platform;
+import javafx.beans.property.ReadOnlyBooleanProperty;
+import javafx.beans.property.ReadOnlyBooleanWrapper;
+import javafx.geometry.Insets;
+import javafx.scene.control.Button;
+import javafx.scene.control.CheckBox;
+import javafx.scene.control.ComboBox;
+import javafx.scene.control.Label;
+import javafx.scene.control.ListView;
+import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
+import javafx.scene.layout.VBox;
+import javafx.stage.FileChooser;
+import javafx.stage.Window;
+
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -19,274 +32,362 @@ import java.util.regex.Pattern;
 
 final class LectureDocuments {
     private static final Pattern NOTE_TIME = Pattern.compile("\\(#t=(\\d+)\\)");
-    private final Consumer<String> notice;
+    private static final DateTimeFormatter REVISION_DATE = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss")
+            .withZone(ZoneId.systemDefault());
+    private final Window owner;
     private final RecordingPlayer player;
+    private final LectureLibrary library;
+    private final Runnable onPublished;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
-    private final DefaultListModel<LocalProcessing.Segment> lines = new DefaultListModel<>();
-    private final JList<LocalProcessing.Segment> transcript = new JList<>(lines);
-    private final JTextArea note = new JTextArea();
-    private final JLabel status = new JLabel(" ");
-    private final JButton recognize = new JButton("Распознать");
-    private final JButton playLine = new JButton("Прослушать реплику");
-    private final JButton exportTranscript = new JButton("Экспорт Markdown");
-    private final JButton generate = new JButton("Сформировать конспект");
-    private final JButton save = new JButton("Сохранить редакцию");
-    private final JButton exportNote = new JButton("Экспорт Markdown");
-    private final JButton playReference = new JButton("Прослушать по ссылке");
-    private Recording selected;
-    private List<LocalProcessing.Segment> segments = List.of();
-    private String noteOnDisk = "";
+    private final ListView<LocalProcessing.Segment> transcript = new ListView<>();
+    private final TextArea note = new TextArea();
+    private final Label status = new Label();
+    private final Label noteStatus = new Label();
+    private final Button recognize = new Button("Распознать");
+    private final Button playLine = new Button("Прослушать реплику");
+    private final Button exportTranscript = new Button("Экспорт Markdown");
+    private final Button generate = new Button("Сформировать конспект");
+    private final Button save = new Button("Сохранить редакцию");
+    private final Button exportNote = new Button("Экспорт Markdown");
+    private final Button playReference = new Button("Прослушать по ссылке");
+    private final Button revisions = new Button("Редакции");
+    private final Button delete = new Button("Удалить конспект");
+    private final ReadOnlyBooleanWrapper busy = new ReadOnlyBooleanWrapper();
+    private LectureLibrary.Lecture selected;
+    private Long transcriptId;
+    private LectureLibrary.Note currentNote;
+    private String savedText = "";
+    private int requestedOrdinal;
     private long selection;
-    private boolean busy;
+    private boolean loading;
     private boolean closed;
     private String whisper = System.getenv().getOrDefault("LECTURENOTES_WHISPER", "");
     private String weights = System.getenv().getOrDefault("LECTURENOTES_WHISPER_MODEL", "");
     private String endpoint = "http://127.0.0.1:47831/v1";
     private String model = "iq3_s";
-    private String focus = "";
     private boolean cpu;
 
-    LectureDocuments(Consumer<String> notice, RecordingPlayer player) {
-        this.notice = notice;
+    LectureDocuments(Window owner, RecordingPlayer player, LectureLibrary library, Runnable onPublished) {
+        this.owner = owner;
         this.player = player;
+        this.library = library;
+        this.onPublished = onPublished;
     }
 
-    JPanel transcriptPanel() {
-        transcript.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
-        transcript.addListSelectionListener(event -> updateButtons());
-        transcript.addMouseListener(new MouseAdapter() {
-            @Override public void mouseClicked(MouseEvent event) {
-                if (event.getClickCount() == 2) playSegment();
-            }
-        });
-        recognize.addActionListener(event -> startRecognition());
-        playLine.addActionListener(event -> playSegment());
-        exportTranscript.addActionListener(event -> {
-            StringBuilder markdown = new StringBuilder("# ").append(selected.title()).append("\n\n");
-            for (var item : segments) markdown.append("- ").append(item).append('\n');
+    VBox transcriptPanel() {
+        transcript.setPlaceholder(new Label("Расшифровки пока нет"));
+        transcript.getSelectionModel().selectedItemProperty().addListener((obs, prior, value) -> updateButtons());
+        transcript.setOnMouseClicked(event -> { if (event.getClickCount() == 2) playSegment(); });
+        recognize.setOnAction(event -> startRecognition());
+        playLine.setOnAction(event -> playSegment());
+        exportTranscript.setOnAction(event -> {
+            var markdown = new StringBuilder("# ").append(selected.title()).append("\n\n");
+            for (var segment : transcript.getItems()) markdown.append("- ").append(segment).append('\n');
             export("transcript.md", markdown.toString());
         });
-        var panel = new JPanel(new BorderLayout());
-        panel.add(new JScrollPane(transcript));
-        panel.add(toolbar(recognize, playLine, exportTranscript), BorderLayout.SOUTH);
-        panel.add(status, BorderLayout.NORTH);
+        var panel = new VBox(8, status, transcript, new HBox(8, recognize, playLine, exportTranscript));
+        panel.setPadding(new Insets(10));
+        VBox.setVgrow(transcript, Priority.ALWAYS);
         updateButtons();
         return panel;
     }
 
-    JPanel notePanel() {
-        note.setLineWrap(true);
-        note.setWrapStyleWord(true);
-        generate.addActionListener(event -> startGeneration());
-        save.addActionListener(event -> saveNote());
-        exportNote.addActionListener(event -> export("note.md", note.getText()));
-        playReference.addActionListener(event -> playReference());
-        var panel = new JPanel(new BorderLayout());
-        panel.add(new JScrollPane(note));
-        panel.add(toolbar(generate, save, playReference, exportNote), BorderLayout.SOUTH);
+    VBox notePanel() {
+        note.setWrapText(true);
+        note.setPromptText("Напишите конспект или сформируйте его по расшифровке");
+        note.textProperty().addListener((obs, prior, text) -> updateButtons());
+        generate.setOnAction(event -> startGeneration());
+        save.setOnAction(event -> saveNote());
+        exportNote.setOnAction(event -> export("note.md", note.getText()));
+        playReference.setOnAction(event -> playReference());
+        revisions.setOnAction(event -> showRevisions());
+        delete.setOnAction(event -> deleteNote());
+        var panel = new VBox(8, noteStatus, note, new HBox(8, generate, save, revisions, delete),
+                new HBox(8, playReference, exportNote));
+        panel.setPadding(new Insets(10));
+        VBox.setVgrow(note, Priority.ALWAYS);
         updateButtons();
         return panel;
     }
 
-    private JPanel toolbar(JButton... buttons) {
-        var bar = new JPanel(new FlowLayout(FlowLayout.LEADING));
-        for (JButton button : buttons) bar.add(button);
-        return bar;
-    }
-
-    void select(Recording item) {
-        if (item != null && item.equals(selected)) return;
+    void select(LectureLibrary.Lecture item, int ordinal) {
+        if (item != null && selected != null && selected.id().equals(item.id())) {
+            selected = item;
+            if (ordinal > 0) requestedOrdinal = ordinal;
+            selectRequestedSegment();
+            updateButtons();
+            return;
+        }
+        requestedOrdinal = ordinal;
         selected = item;
-        long version = ++selection;
-        setSegments(List.of());
-        setNote("");
-        status.setText(" ");
+        long request = ++selection;
+        loading = item != null;
+        transcriptId = null;
+        transcript.getItems().clear();
+        setNote(null);
+        showStatus(item == null ? "" : "Открываем документы");
         updateButtons();
         if (item == null) return;
         worker.execute(() -> {
             try {
-                Path transcriptPath = item.directory().resolve("transcript.srt");
-                var saved = Files.isRegularFile(transcriptPath)
-                        ? LocalProcessing.parseSrt(Files.readString(transcriptPath), 0, Long.MAX_VALUE)
-                        : List.<LocalProcessing.Segment>of();
-                Path notePath = item.directory().resolve("note.md");
-                String markdown = Files.isRegularFile(notePath) ? Files.readString(notePath) : "";
-                finishOnUi(version, () -> {
-                    setSegments(saved);
-                    if (note.getText().isEmpty()) setNote(markdown);
+                var saved = library.documents(item.id());
+                Platform.runLater(() -> {
+                    if (closed || request != selection) return;
+                    transcriptId = saved.transcriptId();
+                    transcript.getItems().setAll(saved.segments());
+                    selectRequestedSegment();
+                    setNote(saved.note());
+                    loading = false;
+                    showStatus("");
                     updateButtons();
                 });
-            } catch (IOException error) {
-                finishOnUi(version, () -> notice.accept("Не удалось открыть документы лекции."));
+            } catch (Exception error) {
+                Platform.runLater(() -> {
+                    if (!closed && request == selection) showStatus("Не удалось открыть документы лекции.");
+                });
             }
         });
     }
 
-    private void setSegments(List<LocalProcessing.Segment> value) {
-        segments = value;
-        lines.clear();
-        for (var segment : value) lines.addElement(segment);
+    private void selectRequestedSegment() {
+        if (requestedOrdinal < 1 || requestedOrdinal > transcript.getItems().size()) return;
+        int index = requestedOrdinal - 1;
+        transcript.getSelectionModel().select(index);
+        transcript.scrollTo(index);
+        requestedOrdinal = 0;
     }
 
-    private void setNote(String text) {
-        noteOnDisk = text;
-        note.setText(text);
-        note.setCaretPosition(0);
+    private void setNote(LectureLibrary.Note value) {
+        currentNote = value;
+        note.setText(value == null ? "" : value.markdown());
+        savedText = note.getText();
+        note.positionCaret(0);
+    }
+
+    private boolean dirty() {
+        return !note.getText().equals(savedText);
     }
 
     private void playSegment() {
-        var segment = transcript.getSelectedValue();
+        var segment = transcript.getSelectionModel().getSelectedItem();
         if (segment != null) player.seek(segment.start(), true);
     }
 
     private void playReference() {
+        String text = note.getText();
+        int caret = note.getCaretPosition();
+        int start = text.lastIndexOf('\n', caret - 1) + 1;
+        int end = text.indexOf('\n', caret);
+        var matcher = NOTE_TIME.matcher(text.substring(start, end < 0 ? text.length() : end));
         try {
-            int line = note.getLineOfOffset(note.getCaretPosition());
-            var matcher = NOTE_TIME.matcher(note.getText(note.getLineStartOffset(line),
-                    note.getLineEndOffset(line) - note.getLineStartOffset(line)));
             if (matcher.find()) player.seek(Long.parseLong(matcher.group(1)), true);
-            else notice.accept("Поставьте курсор на строку со ссылкой на таймкод.");
-        } catch (Exception error) { notice.accept("Не удалось прочитать таймкод."); }
+            else DesktopDialogs.notice(owner, "Поставьте курсор на строку со ссылкой на таймкод.");
+        } catch (NumberFormatException error) {
+            DesktopDialogs.notice(owner, "Не удалось прочитать таймкод.");
+        }
     }
 
     private void startRecognition() {
-        var executable = new JTextField(whisper, 34);
-        var modelFile = new JTextField(weights, 34);
-        var cpuOnly = new JCheckBox("Использовать CPU", cpu);
-        var settings = fields("whisper-cli.exe", executable, "Файл модели", modelFile);
-        settings.add(cpuOnly);
-        if (JOptionPane.showConfirmDialog(transcript, settings, "Распознавание речи",
-                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE) != JOptionPane.OK_OPTION) return;
+        var executable = new TextField(whisper);
+        var modelFile = new TextField(weights);
+        executable.setPrefColumnCount(36);
+        modelFile.setPrefColumnCount(36);
+        var cpuOnly = new CheckBox("Использовать CPU");
+        cpuOnly.setSelected(cpu);
+        var settings = DesktopDialogs.fields();
+        DesktopDialogs.field(settings, 0, "whisper-cli.exe", executable);
+        DesktopDialogs.field(settings, 1, "Файл модели", modelFile);
+        settings.add(cpuOnly, 1, 2);
+        if (!DesktopDialogs.form(owner, "Распознавание речи", settings)) return;
         whisper = executable.getText().strip();
         weights = modelFile.getText().strip();
         cpu = cpuOnly.isSelected();
-        if (whisper.isEmpty() || weights.isEmpty()) { notice.accept("Укажите пути к whisper-cli.exe и модели."); return; }
         final Path exe;
         final Path bin;
-        try { exe = Path.of(whisper).toAbsolutePath(); bin = Path.of(weights).toAbsolutePath(); }
-        catch (IllegalArgumentException error) { notice.accept("Проверьте пути к файлам."); return; }
-        var item = selected;
+        try {
+            if (whisper.isEmpty() || weights.isEmpty()) throw new IllegalArgumentException();
+            exe = Path.of(whisper).toAbsolutePath();
+            bin = Path.of(weights).toAbsolutePath();
+        } catch (IllegalArgumentException error) {
+            DesktopDialogs.notice(owner, "Укажите пути к whisper-cli.exe и модели.");
+            return;
+        }
+        String id = selected.id();
         boolean useCpu = cpu;
         run("Распознаём речь", () -> {
-            var result = LocalProcessing.transcribe(item, exe, bin, useCpu);
-            return () -> setSegments(result);
-        });
+            var audio = new Recording(library.recordingsPath(id));
+            var result = LocalProcessing.transcribe(audio, exe, bin, useCpu);
+            long version = library.saveTranscript(id, result);
+            return () -> {
+                transcriptId = version;
+                transcript.getItems().setAll(result);
+                selectRequestedSegment();
+            };
+        }, true);
     }
 
     private void startGeneration() {
-        if (!note.getText().equals(noteOnDisk)) {
-            notice.accept("Сохраните текущую редакцию перед генерацией.");
+        if (dirty()) {
+            DesktopDialogs.notice(owner, "Сохраните текущую редакцию перед генерацией.");
             return;
         }
-        var address = new JTextField(endpoint, 28);
-        var name = new JTextField(model, 28);
-        var topic = new JTextField(focus, 28);
-        if (JOptionPane.showConfirmDialog(note, fields("Локальный API", address, "ID модели", name, "Фокус", topic),
-                "Сформировать конспект", JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE)
-                != JOptionPane.OK_OPTION) return;
+        var address = new TextField(endpoint);
+        var name = new TextField(model);
+        var focus = new TextField(selected.focus());
+        var settings = DesktopDialogs.fields();
+        DesktopDialogs.field(settings, 0, "Локальный API", address);
+        DesktopDialogs.field(settings, 1, "ID модели", name);
+        DesktopDialogs.field(settings, 2, "Фокус", focus);
+        if (!DesktopDialogs.form(owner, "Сформировать конспект", settings)) return;
         endpoint = address.getText().strip();
         model = name.getText().strip();
-        focus = topic.getText().strip();
         final URI base;
         try { base = URI.create(endpoint); }
-        catch (IllegalArgumentException error) { notice.accept("Проверьте адрес локального API."); return; }
+        catch (IllegalArgumentException error) {
+            DesktopDialogs.notice(owner, "Проверьте адрес локального API.");
+            return;
+        }
         var item = selected;
-        var source = segments;
+        var source = List.copyOf(transcript.getItems());
+        Long sourceId = transcriptId;
         String modelId = model;
-        String requestedFocus = focus;
+        String requestedFocus = focus.getText().strip();
         run("Формируем конспект", () -> {
-            String markdown = LocalProcessing.generate(item, source, base, modelId, requestedFocus);
-            return () -> setNote(markdown);
-        });
+            String markdown = LocalProcessing.generate(item.topic().isBlank() ? item.title() : item.topic(),
+                    source, base, modelId, requestedFocus);
+            library.saveNote(item.id(), sourceId, markdown, true);
+            return () -> setNote(new LectureLibrary.Note(sourceId, markdown));
+        }, true);
     }
 
     private void saveNote() {
-        var item = selected;
-        String body = note.getText();
+        String id = selected.id();
+        String markdown = note.getText();
+        Long sourceId = currentNote == null ? transcriptId : currentNote.transcriptId();
         run("Сохраняем редакцию", () -> {
-            LocalProcessing.saveNote(item, body);
-            return () -> noteOnDisk = body;
-        });
+            library.saveNote(id, sourceId, markdown, false);
+            return () -> {
+                currentNote = new LectureLibrary.Note(sourceId, markdown);
+                savedText = markdown;
+            };
+        }, true);
+    }
+
+    private void showRevisions() {
+        if (!canLeaveSelection()) return;
+        String id = selected.id();
+        run("Открываем редакции", () -> {
+            var versions = library.noteVersions(id);
+            return () -> chooseRevision(id, versions);
+        }, false);
+    }
+
+    private void chooseRevision(String id, List<LectureLibrary.NoteRevision> versions) {
+        if (versions.isEmpty()) return;
+        var choices = new ComboBox<String>();
+        for (var version : versions) {
+            String source = switch (version.source()) {
+                case "MANUAL" -> "ручная";
+                case "GENERATED" -> "модель";
+                default -> "импорт";
+            };
+            choices.getItems().add(REVISION_DATE.format(version.created()) + " · " + source + " · №" + version.id());
+        }
+        choices.getSelectionModel().selectFirst();
+        if (!DesktopDialogs.form(owner, "Восстановить редакцию", choices)) return;
+        long version = versions.get(choices.getSelectionModel().getSelectedIndex()).id();
+        run("Восстанавливаем редакцию", () -> {
+            var restored = library.restoreNote(id, version);
+            return () -> setNote(restored);
+        }, true);
+    }
+
+    private void deleteNote() {
+        if (!DesktopDialogs.confirm(owner, "Удаление конспекта", "Удалить конспект и все его редакции?")) return;
+        String id = selected.id();
+        run("Удаляем конспект", () -> {
+            library.deleteNote(id);
+            return () -> setNote(null);
+        }, true);
     }
 
     private void export(String name, String body) {
-        var dialog = new JFileChooser();
-        dialog.setSelectedFile(new java.io.File(name));
-        if (dialog.showSaveDialog(note) != JFileChooser.APPROVE_OPTION) return;
-        Path destination = dialog.getSelectedFile().toPath();
-        if (Files.exists(destination) && JOptionPane.showConfirmDialog(note, "Заменить существующий файл?",
-                "Экспорт", JOptionPane.YES_NO_OPTION) != JOptionPane.YES_OPTION) return;
+        var dialog = new FileChooser();
+        dialog.setTitle("Экспорт Markdown");
+        dialog.setInitialFileName(name);
+        dialog.getExtensionFilters().add(new FileChooser.ExtensionFilter("Markdown", "*.md"));
+        var file = dialog.showSaveDialog(owner);
+        if (file == null) return;
+        Path destination = file.toPath();
+        if (Files.exists(destination) && !DesktopDialogs.confirm(owner, "Экспорт", "Заменить существующий файл?")) return;
         run("Экспортируем Markdown", () -> {
             LocalProcessing.writeAtomic(destination, body);
             return () -> { };
-        });
-    }
-
-    private JPanel fields(Object... pairs) {
-        var form = new JPanel(new GridLayout(0, 1, 0, 4));
-        for (int index = 0; index < pairs.length; index += 2) {
-            var label = new JLabel((String) pairs[index]);
-            var field = (JTextField) pairs[index + 1];
-            label.setLabelFor(field);
-            form.add(label);
-            form.add(field);
-        }
-        return form;
+        }, false);
     }
 
     @FunctionalInterface
-    private interface Background {
-        Runnable call() throws Exception;
-    }
+    private interface Background { Runnable call() throws Exception; }
 
-    private void run(String message, Background task) {
-        long version = selection;
-        busy = true;
-        status.setText(message);
+    private void run(String message, Background task, boolean publish) {
+        long request = selection;
+        busy.set(true);
+        showStatus(message);
         updateButtons();
         worker.execute(() -> {
             try {
                 Runnable completed = task.call();
-                finishOnUi(version, () -> { completed.run(); status.setText("Готово"); });
+                Platform.runLater(() -> {
+                    if (closed) return;
+                    busy.set(false);
+                    if (request == selection) {
+                        showStatus("Готово");
+                        completed.run();
+                    }
+                    updateButtons();
+                    if (publish) onPublished.run();
+                });
             } catch (Exception error) {
-                finishOnUi(version, () -> {
-                    status.setText("Операция завершилась ошибкой");
+                Platform.runLater(() -> {
+                    if (closed) return;
+                    busy.set(false);
+                    updateButtons();
+                    if (request != selection) return;
+                    showStatus("Операция завершилась ошибкой");
                     String detail = error instanceof IOException && error.getMessage() != null
                             && error.getMessage().codePoints().anyMatch(cp -> cp >= 0x410 && cp <= 0x44f)
                             ? error.getMessage() : "Не удалось выполнить операцию.";
-                    notice.accept(detail);
-                });
-            } finally {
-                SwingUtilities.invokeLater(() -> {
-                    if (closed) return;
-                    busy = false;
-                    updateButtons();
+                    DesktopDialogs.notice(owner, detail);
                 });
             }
         });
     }
 
-    private void finishOnUi(long version, Runnable action) {
-        SwingUtilities.invokeLater(() -> { if (!closed && version == selection) action.run(); });
+    private void updateButtons() {
+        boolean available = selected != null && !busy.get() && !loading;
+        note.setEditable(available);
+        recognize.setDisable(!available || !selected.hasAudio());
+        playLine.setDisable(transcript.getSelectionModel().getSelectedItem() == null);
+        exportTranscript.setDisable(!available || transcript.getItems().isEmpty());
+        generate.setDisable(!available || transcript.getItems().isEmpty());
+        save.setDisable(!available || !dirty());
+        exportNote.setDisable(!available || note.getText().isBlank());
+        playReference.setDisable(!available || !selected.hasAudio());
+        revisions.setDisable(!available || currentNote == null);
+        delete.setDisable(!available || currentNote == null);
     }
 
-    private void updateButtons() {
-        boolean available = selected != null && !busy;
-        note.setEditable(available);
-        recognize.setEnabled(available && List.of("COMPLETE", "PARTIAL").contains(selected.state()));
-        playLine.setEnabled(transcript.getSelectedValue() != null);
-        exportTranscript.setEnabled(available && !segments.isEmpty());
-        generate.setEnabled(available && !segments.isEmpty());
-        save.setEnabled(available);
-        exportNote.setEnabled(available);
-        playReference.setEnabled(selected != null);
+    private void showStatus(String value) {
+        status.setText(value);
+        noteStatus.setText(value);
     }
 
     boolean canLeaveSelection() {
-        return note.getText().equals(noteOnDisk) || JOptionPane.showConfirmDialog(note,
-                "В конспекте есть несохранённые правки. Продолжить?", "Несохранённые правки",
-                JOptionPane.YES_NO_OPTION) == JOptionPane.YES_OPTION;
+        return !dirty() || DesktopDialogs.confirm(owner, "Несохранённые правки",
+                "В конспекте есть несохранённые правки. Продолжить?");
     }
+
+    ReadOnlyBooleanProperty busyProperty() { return busy.getReadOnlyProperty(); }
 
     void close() {
         closed = true;
