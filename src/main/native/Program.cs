@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Threading;
 
 internal static class Program
@@ -15,6 +16,22 @@ internal static class Program
     {
         try
         {
+            if (args.Length == 1 && (args[0] == "protect-invitation" || args[0] == "unprotect-invitation"))
+            {
+                using (var input = Console.OpenStandardInput())
+                using (var output = Console.OpenStandardOutput())
+                using (var buffer = new MemoryStream())
+                {
+                    input.CopyTo(buffer);
+                    if (buffer.Length == 0 || buffer.Length > 16384) return 2;
+                    byte[] data = buffer.ToArray();
+                    byte[] result = args[0] == "protect-invitation"
+                        ? ProtectedData.Protect(data, null, DataProtectionScope.CurrentUser)
+                        : ProtectedData.Unprotect(data, null, DataProtectionScope.CurrentUser);
+                    output.Write(result, 0, result.Length);
+                }
+                return 0;
+            }
             if (args.Length == 2 && args[0] == "recover")
             {
                 WaveChunks.Recover(Path.GetFullPath(args[1]));

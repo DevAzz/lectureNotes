@@ -4,14 +4,15 @@ import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
-import javafx.scene.control.CheckBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
+import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import org.example.SaluteJazzPage.State;
@@ -30,7 +31,7 @@ import java.util.regex.Pattern;
 final class DesktopWindow {
     private static final Pattern LEVEL = Pattern.compile("\\{\"event\":\"level\",\"peak\":(\\d+),\"frames\":(\\d+)\\}");
 
-    private record Draft(String subject, String title, String topic, String focus) { }
+    private record Draft(String subject, String title, String topic, String focus, URI invitation) { }
 
     private final Stage stage = new Stage();
     private final Path data;
@@ -41,8 +42,7 @@ final class DesktopWindow {
     private final TextField topic = new TextField();
     private final TextField focus = new TextField();
     private final TextField invitation = new TextField();
-    private final CheckBox permission = new CheckBox("Разрешение на запись получено");
-    private final Button open = new Button("Подключиться");
+    private final Button open = new Button("Подключиться и записать");
     private final Button save = new Button("Сохранить карточку");
     private final Button reset = new Button("Новая карточка");
     private final Button start = new Button("Я на встрече · начать запись");
@@ -50,6 +50,8 @@ final class DesktopWindow {
     private final Button leave = new Button("Завершить встречу");
     private final Label status = new Label("Готово к подключению");
     private final ProgressBar level = new ProgressBar(0);
+    private final Label liveStatus = new Label("Ожидаем начала записи");
+    private final TextArea liveText = new TextArea();
     private final TabPane sections = new TabPane();
     private final Tab meetingTab;
     private final LibraryPanel libraryPanel;
@@ -57,8 +59,11 @@ final class DesktopWindow {
     private ScheduledFuture<?> browserWatch;
     private State browserState = State.WAITING_USER;
     private Process capture;
+    private Thread liveWorker;
+    private boolean signalReported;
     private String draftId;
     private String activeId;
+    private Instant recordingRequestedAt;
     private boolean busy;
     private boolean stopped;
     private boolean captureStartFailed;
@@ -99,16 +104,12 @@ final class DesktopWindow {
         DesktopDialogs.field(form, 2, "Тема", topic);
         DesktopDialogs.field(form, 3, "Фокус конспекта", focus);
         DesktopDialogs.field(form, 4, "Ссылка SaluteJazz", invitation);
-        form.add(permission, 1, 5);
         form.setMaxWidth(690);
         invitation.setPromptText("https://");
         open.setOnAction(event -> openMeeting());
         save.setOnAction(event -> saveCard());
         reset.setOnAction(event -> clearDraft());
         start.setOnAction(event -> startCapture(true));
-        permission.selectedProperty().addListener((value, old, approved) -> {
-            if (!tryStartAutomatically()) buttons();
-        });
         stop.setOnAction(event -> {
             stopped = true;
             recordStop();
@@ -118,10 +119,17 @@ final class DesktopWindow {
             leaveMeeting();
         });
         level.setPrefWidth(270);
-        var meter = new HBox(10, new Label("Уровень звука"), level);
+        var meter = new HBox(10, new Label("Входящий звук Chrome"), level);
         var cardActions = new HBox(8, open, save, reset);
         var captureActions = new HBox(8, start, stop, leave);
-        var panel = new VBox(16, form, cardActions, captureActions, status, meter);
+        liveText.setEditable(false);
+        liveText.setWrapText(true);
+        liveText.setPrefRowCount(5);
+        liveText.setMinHeight(65);
+        var live = new VBox(6, new Label("Расшифровка во время записи"), liveStatus, liveText);
+        VBox.setVgrow(liveText, Priority.ALWAYS);
+        VBox.setVgrow(live, Priority.ALWAYS);
+        var panel = new VBox(16, form, cardActions, captureActions, status, meter, live);
         panel.setPadding(new Insets(24));
         return panel;
     }
@@ -145,10 +153,25 @@ final class DesktopWindow {
         topic.setText(item.topic());
         focus.setText(item.focus());
         invitation.clear();
-        permission.setSelected(false);
-        status.setText("Карточка открыта");
+        status.setText("Открываем карточку");
         sections.getSelectionModel().select(meetingTab);
-        invitation.requestFocus();
+        busy = true;
+        buttons();
+        workers.execute(() -> {
+            try {
+                String link = InvitationSecret.unprotect(library.encryptedInvitation(item.id()));
+                Platform.runLater(() -> {
+                    invitation.setText(link);
+                    finishFormAction("Карточка открыта", null);
+                    if (!closing) invitation.requestFocus();
+                });
+            } catch (Exception error) {
+                Platform.runLater(() -> {
+                    clearDraft();
+                    finishFormAction("Не удалось открыть карточку", "Не удалось прочитать сохранённую ссылку.");
+                });
+            }
+        });
     }
 
     private void clearDraft() {
@@ -158,7 +181,6 @@ final class DesktopWindow {
         topic.clear();
         focus.clear();
         invitation.clear();
-        permission.setSelected(false);
         status.setText("Готово к подключению");
     }
 
@@ -167,12 +189,19 @@ final class DesktopWindow {
             notice("Введите предмет и название лекции.");
             return null;
         }
-        return new Draft(subject.getText(), title.getText(), topic.getText(), focus.getText());
+        try {
+            URI link = invitation.getText().isBlank() ? null : MeetingBrowser.invitation(invitation.getText());
+            return new Draft(subject.getText(), title.getText(), topic.getText(), focus.getText(), link);
+        } catch (IllegalArgumentException error) {
+            notice("Введите HTTPS-ссылку на встречу в SaluteJazz.");
+            return null;
+        }
     }
 
     private String persistDraft(String id, Draft draft) throws Exception {
-        if (id == null) return library.createLecture(draft.subject(), draft.title(), draft.topic(), draft.focus());
-        library.editLecture(id, draft.subject(), draft.title(), draft.topic(), draft.focus());
+        byte[] link = InvitationSecret.protect(draft.invitation());
+        if (id == null) return library.createLecture(draft.subject(), draft.title(), draft.topic(), draft.focus(), link);
+        library.editMeetingCard(id, draft.subject(), draft.title(), draft.topic(), draft.focus(), link);
         return id;
     }
 
@@ -191,7 +220,8 @@ final class DesktopWindow {
                     finishFormAction("Карточка сохранена", null);
                 });
             } catch (Exception error) {
-                Platform.runLater(() -> finishFormAction("Не удалось сохранить карточку", null));
+                Platform.runLater(() -> finishFormAction("Не удалось сохранить карточку",
+                        error instanceof IOException ? error.getMessage() : null));
             }
         });
     }
@@ -199,14 +229,14 @@ final class DesktopWindow {
     private void openMeeting() {
         Draft draft = readDraft();
         if (draft == null) return;
-        final URI link;
-        try { link = MeetingBrowser.invitation(invitation.getText()); }
-        catch (IllegalArgumentException error) {
+        URI link = draft.invitation();
+        if (link == null) {
             notice("Введите HTTPS-ссылку на встречу в SaluteJazz.");
             return;
         }
         String current = draftId;
         busy = true;
+        recordingRequestedAt = Instant.now();
         stopped = false;
         captureStartFailed = false;
         finishing = false;
@@ -226,7 +256,6 @@ final class DesktopWindow {
                     browser = launched;
                     browserState = State.AUTHENTICATING;
                     busy = false;
-                    invitation.clear();
                     status.setText("Войдите в браузере и дождитесь допуска к встрече");
                     libraryPanel.refresh(true, id);
                     if (closing) leaveMeeting();
@@ -282,7 +311,7 @@ final class DesktopWindow {
             case AUTHENTICATING -> "Продолжите в Chrome. Если появится проверка входа, пройдите её вручную";
             case PREJOIN -> "Подключитесь к встрече в Chrome";
             case WAITING_ADMISSION -> "Ожидаем допуска организатора";
-            case IN_CALL -> "Допуск подтверждён. Подтвердите разрешение на запись";
+            case IN_CALL -> "Допуск к встрече подтверждён";
             case RECONNECTING -> "SaluteJazz восстанавливает соединение";
             case DENIED -> "Организатор отклонил подключение";
             case ENDED -> "Встреча завершена в SaluteJazz";
@@ -301,16 +330,12 @@ final class DesktopWindow {
 
     private boolean tryStartAutomatically() {
         if (busy || closing || finishing || browser == null || stopped || captureStartFailed || capture != null
-                || browserState != State.IN_CALL || !permission.isSelected()) return false;
+                || browserState != State.IN_CALL) return false;
         startCapture(false);
         return true;
     }
 
     private void startCapture(boolean manual) {
-        if (!permission.isSelected()) {
-            notice("Подтвердите, что получили разрешение на запись.");
-            return;
-        }
         if (!browser.process().isAlive()) {
             leaveMeeting();
             return;
@@ -318,6 +343,8 @@ final class DesktopWindow {
         busy = true;
         var session = browser;
         String id = activeId;
+        Instant requestedAt = recordingRequestedAt;
+        String recordingAction = open.getText();
         status.setText("Запускаем захват звука");
         buttons();
         workers.execute(() -> {
@@ -332,14 +359,16 @@ final class DesktopWindow {
                     });
                     return;
                 }
-                output = library.startRecording(id).directory();
+                output = library.startRecording(id, requestedAt, recordingAction).directory();
                 Process process = Capture.start(session.process(), output);
+                Path recordingDirectory = output;
                 Platform.runLater(() -> {
                     capture = process;
+                    signalReported = false;
                     busy = false;
                     buttons();
                     libraryPanel.refresh(false, null);
-                    endIfMeetingClosed();
+                    if (!endIfMeetingClosed()) startLiveTranscription(process, recordingDirectory);
                 });
                 Thread.startVirtualThread(() -> monitorCapture(id, process));
             } catch (Exception failure) {
@@ -356,8 +385,45 @@ final class DesktopWindow {
         });
     }
 
+    private void startLiveTranscription(Process process, Path directory) {
+        var whisper = libraryPanel.whisper();
+        liveText.clear();
+        liveStatus.setText("Готовим первый фрагмент");
+        liveWorker = Thread.startVirtualThread(() -> {
+            try {
+                LiveTranscription.follow(new Recording(directory), whisper, segments -> Platform.runLater(() -> {
+                    if (capture != process || liveWorker == null) return;
+                    if (segments.isEmpty()) {
+                        if (liveText.getText().isEmpty()) liveStatus.setText("Ожидаем речь других участников");
+                        return;
+                    }
+                    liveStatus.setText("Черновик пополняется по мере записи");
+                    var text = new StringBuilder();
+                    for (var segment : segments) text.append(segment).append('\n');
+                    liveText.appendText(text.toString());
+                }));
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            } catch (IOException error) {
+                Platform.runLater(() -> {
+                    if (capture != process || liveWorker == null) return;
+                    liveWorker = null;
+                    liveStatus.setText("Живая расшифровка прервалась. Запись продолжается.");
+                });
+            }
+        });
+    }
+
+    private void stopLiveTranscription() {
+        if (liveWorker == null) return;
+        liveWorker.interrupt();
+        liveWorker = null;
+        liveStatus.setText("Полная расшифровка доступна через «Распознать» в библиотеке");
+    }
+
     private void monitorCapture(String id, Process process) {
         int exit = 1;
+        long lastSignalAt = System.nanoTime();
         try (var events = process.inputReader(StandardCharsets.UTF_8)) {
             String line;
             while ((line = events.readLine()) != null) {
@@ -367,11 +433,20 @@ final class DesktopWindow {
                 var match = LEVEL.matcher(line);
                 if (match.matches()) {
                     int peak = Integer.parseInt(match.group(1));
-                    long millis = Long.parseLong(match.group(2)) * 1000 / Recording.SAMPLE_RATE;
+                    long frame = Long.parseLong(match.group(2));
+                    long millis = frame * 1000 / Recording.SAMPLE_RATE;
+                    boolean signal = peak > Recording.SILENCE_PEAK;
+                    long now = System.nanoTime();
+                    if (signal) lastSignalAt = now;
+                    boolean waitingForSound = now - lastSignalAt >= TimeUnit.SECONDS.toNanos(3);
                     Platform.runLater(() -> {
                         if (capture != process || busy) return;
                         level.setProgress(peak / 32768.0);
+                        if (signal) signalReported = true;
                         String connection = browserState == State.RECONNECTING ? " · восстанавливаем соединение" : "";
+                        if (connection.isEmpty() && waitingForSound) {
+                            connection = " · нет входящего звука";
+                        }
                         status.setText("Идёт запись · " + RecordingPlayer.timestamp(millis) + connection);
                     });
                 }
@@ -387,6 +462,7 @@ final class DesktopWindow {
     private void recordStop() {
         busy = true;
         status.setText("Сохраняем запись");
+        stopLiveTranscription();
         Process process = capture;
         String id = activeId;
         Instant requestedAt = Instant.now();
@@ -407,26 +483,46 @@ final class DesktopWindow {
 
     private void captureEnded(String id, Process process, int exit) {
         if (capture != process) return;
+        stopLiveTranscription();
         capture = null;
         level.setProgress(0);
         busy = true;
         boolean partial = stopped || !finishRequested || exit != 0;
+        boolean noSignalReported = !signalReported;
         stopped = true;
         buttons();
         workers.execute(() -> {
             String stored = null;
+            boolean silent = false;
             try {
                 Path path = library.recordingsPath(id);
                 if (exit != 0) Capture.recover(path);
-                String state = new Recording(path).chunks().isEmpty() ? "EMPTY" : partial ? "PARTIAL" : "COMPLETE";
+                var chunks = new Recording(path).chunks();
+                String state = chunks.isEmpty() ? "EMPTY" : partial ? "PARTIAL" : "COMPLETE";
                 library.finishRecording(id, state);
                 stored = state;
+                if (noSignalReported && !chunks.isEmpty()) {
+                    try {
+                        boolean hasSignal = false;
+                        for (var chunk : chunks) {
+                            if (!Recording.isDigitalSilence(chunk.path())) {
+                                hasSignal = true;
+                                break;
+                            }
+                        }
+                        silent = !hasSignal;
+                    } catch (IOException ignored) {
+                        // Audio is saved. A failed signal check should not change its state.
+                    }
+                }
             } catch (Exception error) { Platform.runLater(() -> notice("Не удалось завершить сохранение записи.")); }
             String state = stored;
+            boolean noSignal = silent;
             Platform.runLater(() -> {
                 busy = false;
                 status.setText(state == null ? "Запись требует восстановления" : exit != 0 ? "Захват прервался" :
-                        state.equals("EMPTY") ? "Аудио не получено" : "Запись сохранена в библиотеке");
+                        state.equals("EMPTY") ? "Аудио не получено" : noSignal ?
+                                "Запись сохранена · входящего звука не было" : "Запись сохранена в библиотеке");
                 if (finishing) leaveMeeting();
                 else endIfMeetingClosed();
                 libraryPanel.refresh(false, null);
@@ -458,8 +554,11 @@ final class DesktopWindow {
                     busy = false;
                     activeId = null;
                     finishing = false;
-                    permission.setSelected(false);
-                    if (stopped) draftId = null;
+                    recordingRequestedAt = null;
+                    if (stopped) {
+                        draftId = null;
+                        invitation.clear();
+                    }
                     if (!stopped && browserState != State.CLOSED && browserState != State.ENDED) {
                         status.setText("Встреча завершена");
                     }
@@ -484,7 +583,6 @@ final class DesktopWindow {
         topic.setDisable(!editing);
         focus.setDisable(!editing);
         invitation.setDisable(!editing);
-        permission.setDisable(!idle || capture != null);
         libraryPanel.updateButtons();
     }
 

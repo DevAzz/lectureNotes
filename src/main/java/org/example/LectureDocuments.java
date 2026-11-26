@@ -44,6 +44,7 @@ final class LectureDocuments {
     private final Label status = new Label();
     private final Label noteStatus = new Label();
     private final Button recognize = new Button("Распознать");
+    private final Button whisperSettings = new Button("Настройки Whisper");
     private final Button playLine = new Button("Прослушать реплику");
     private final Button exportTranscript = new Button("Экспорт Markdown");
     private final Button generate = new Button("Сформировать конспект");
@@ -61,17 +62,31 @@ final class LectureDocuments {
     private long selection;
     private boolean loading;
     private boolean closed;
-    private String whisper = System.getenv().getOrDefault("LECTURENOTES_WHISPER", "");
-    private String weights = System.getenv().getOrDefault("LECTURENOTES_WHISPER_MODEL", "");
+    private LocalProcessing.Whisper whisper;
     private String endpoint = "http://127.0.0.1:47831/v1";
     private String model = "iq3_s";
-    private boolean cpu;
 
     LectureDocuments(Window owner, RecordingPlayer player, LectureLibrary library, Runnable onPublished) {
         this.owner = owner;
         this.player = player;
         this.library = library;
         this.onPublished = onPublished;
+        var bundled = LocalProcessing.bundledWhisper(false);
+        if (!bundled.available()) bundled = LocalProcessing.bundledWhisper(true);
+        Path executable = configuredPath("LECTURENOTES_WHISPER", bundled.executable());
+        Path weights = configuredPath("LECTURENOTES_WHISPER_MODEL", bundled.model());
+        whisper = new LocalProcessing.Whisper(executable, weights, executable.equals(bundled.executable()) && bundled.cpu());
+    }
+
+    private static Path configuredPath(String variable, Path fallback) {
+        String value = System.getenv(variable);
+        if (value == null || value.isBlank()) return fallback;
+        try { return Path.of(value).toAbsolutePath(); }
+        catch (java.nio.file.InvalidPathException error) { return fallback; }
+    }
+
+    LocalProcessing.Whisper whisper() {
+        return whisper;
     }
 
     VBox transcriptPanel() {
@@ -79,13 +94,14 @@ final class LectureDocuments {
         transcript.getSelectionModel().selectedItemProperty().addListener((obs, prior, value) -> updateButtons());
         transcript.setOnMouseClicked(event -> { if (event.getClickCount() == 2) playSegment(); });
         recognize.setOnAction(event -> startRecognition());
+        whisperSettings.setOnAction(event -> configureWhisper());
         playLine.setOnAction(event -> playSegment());
         exportTranscript.setOnAction(event -> {
             var markdown = new StringBuilder("# ").append(selected.title()).append("\n\n");
             for (var segment : transcript.getItems()) markdown.append("- ").append(segment).append('\n');
             export("transcript.md", markdown.toString());
         });
-        var panel = new VBox(8, status, transcript, new HBox(8, recognize, playLine, exportTranscript));
+        var panel = new VBox(8, status, transcript, new HBox(8, recognize, whisperSettings, playLine, exportTranscript));
         panel.setPadding(new Insets(10));
         VBox.setVgrow(transcript, Priority.ALWAYS);
         updateButtons();
@@ -187,36 +203,39 @@ final class LectureDocuments {
         }
     }
 
-    private void startRecognition() {
-        var executable = new TextField(whisper);
-        var modelFile = new TextField(weights);
+    private boolean configureWhisper() {
+        var executable = new TextField(whisper.executable().toString());
+        var modelFile = new TextField(whisper.model().toString());
         executable.setPrefColumnCount(36);
         modelFile.setPrefColumnCount(36);
         var cpuOnly = new CheckBox("Использовать CPU");
-        cpuOnly.setSelected(cpu);
+        cpuOnly.setSelected(whisper.cpu());
         var settings = DesktopDialogs.fields();
         DesktopDialogs.field(settings, 0, "whisper-cli.exe", executable);
         DesktopDialogs.field(settings, 1, "Файл модели", modelFile);
         settings.add(cpuOnly, 1, 2);
-        if (!DesktopDialogs.form(owner, "Распознавание речи", settings)) return;
-        whisper = executable.getText().strip();
-        weights = modelFile.getText().strip();
-        cpu = cpuOnly.isSelected();
-        final Path exe;
-        final Path bin;
+        if (!DesktopDialogs.form(owner, "Настройки Whisper", settings)) return false;
         try {
-            if (whisper.isEmpty() || weights.isEmpty()) throw new IllegalArgumentException();
-            exe = Path.of(whisper).toAbsolutePath();
-            bin = Path.of(weights).toAbsolutePath();
+            var chosen = new LocalProcessing.Whisper(Path.of(executable.getText().strip()).toAbsolutePath(),
+                    Path.of(modelFile.getText().strip()).toAbsolutePath(), cpuOnly.isSelected());
+            if (chosen.available()) {
+                whisper = chosen;
+                return true;
+            }
         } catch (IllegalArgumentException error) {
-            DesktopDialogs.notice(owner, "Укажите пути к whisper-cli.exe и модели.");
-            return;
+            // Invalid path syntax uses the same feedback as a missing file.
         }
+        DesktopDialogs.notice(owner, "Укажите существующие файлы whisper-cli.exe и модели.");
+        return false;
+    }
+
+    private void startRecognition() {
+        if (!whisper.available() && !configureWhisper()) return;
         String id = selected.id();
-        boolean useCpu = cpu;
+        LocalProcessing.Whisper engine = whisper;
         run("Распознаём речь", () -> {
             var audio = new Recording(library.recordingsPath(id));
-            var result = LocalProcessing.transcribe(audio, exe, bin, useCpu);
+            var result = LocalProcessing.transcribe(audio, engine);
             long version = library.saveTranscript(id, result);
             return () -> {
                 transcriptId = version;
@@ -367,6 +386,7 @@ final class LectureDocuments {
         boolean available = selected != null && !busy.get() && !loading;
         note.setEditable(available);
         recognize.setDisable(!available || !selected.hasAudio());
+        whisperSettings.setDisable(busy.get());
         playLine.setDisable(transcript.getSelectionModel().getSelectedItem() == null);
         exportTranscript.setDisable(!available || transcript.getItems().isEmpty());
         generate.setDisable(!available || transcript.getItems().isEmpty());

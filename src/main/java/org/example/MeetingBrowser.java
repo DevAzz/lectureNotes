@@ -98,6 +98,10 @@ final class MeetingBrowser implements AutoCloseable {
         return process;
     }
 
+    Page controlledPage() {
+        return page;
+    }
+
     static Playwright startDriver() {
         return Playwright.create(new Playwright.CreateOptions().setEnv(Map.of(
                 "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1", "DEBUG", "", "PWDEBUG", "0")));

@@ -3,12 +3,14 @@ package org.example;
 import javax.sound.sampled.AudioFileFormat;
 import javax.sound.sampled.AudioFormat;
 import javax.sound.sampled.AudioSystem;
+import javax.sound.sampled.UnsupportedAudioFileException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.net.ProxySelector;
 import java.net.SocketAddress;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -25,6 +27,9 @@ import java.util.regex.Pattern;
 final class LocalProcessing {
     private static final Pattern CUE = Pattern.compile(
             "(\\d{2}:\\d{2}:\\d{2},\\d{3}) --> (\\d{2}:\\d{2}:\\d{2},\\d{3})");
+    private static final Pattern SOUND_MARKER = Pattern.compile(
+            "\\[[^\\[\\]]*\\]|\\((?:музыка|тишина|шум|смех|аплодисменты|music|silence|noise|laughter|applause)\\)",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
     private static final Pattern REFERENCE = Pattern.compile("\\[\\[S(\\d+)]]");
     private static final int PROMPT_PART_LENGTH = 8_000;
     private static final int SYNTHESIS_LENGTH = 15_000;
@@ -33,32 +38,50 @@ final class LocalProcessing {
         @Override public String toString() { return RecordingPlayer.timestamp(start) + "  " + text; }
     }
 
-    static List<Segment> transcribe(Recording recording, Path whisper, Path model, boolean cpu)
+    record Whisper(Path executable, Path model, boolean cpu) {
+        boolean available() {
+            return Files.isRegularFile(executable) && Files.isRegularFile(model);
+        }
+    }
+
+    static Whisper bundledWhisper(boolean cpu) {
+        try {
+            Path location = Path.of(LocalProcessing.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            Path directory = (Files.isDirectory(location) ? location : location.getParent()).resolve("whisper");
+            Path runtime = cpu ? directory : directory.resolve("cuda");
+            Path full = directory.resolve("ggml-large-v3.bin");
+            Path model = Files.isRegularFile(full) ? full : directory.resolve("ggml-large-v3-turbo-q5_0.bin");
+            return new Whisper(runtime.resolve("whisper-cli.exe"), model, cpu);
+        } catch (URISyntaxException error) {
+            throw new IllegalStateException("Не удалось определить путь к Whisper.", error);
+        }
+    }
+
+    static List<Segment> transcribe(Recording recording, Whisper engine)
             throws Exception {
-        if (!Files.isRegularFile(whisper) || !Files.isRegularFile(model)) {
+        var fallback = cpuFallback(engine);
+        boolean bundled = supportsNativeWav(engine);
+        Whisper active = fallback != null && engine.cpu() ? fallback : engine;
+        if (!active.available()) {
             throw new IOException("Укажите существующие файлы whisper-cli.exe и модели.");
         }
         var segments = new ArrayList<Segment>();
+        boolean hasSignal = false;
         for (Recording.Chunk chunk : recording.chunks()) {
+            if (Recording.isDigitalSilence(chunk.path())) continue;
+            hasSignal = true;
             Path checkpoint = recording.directory().resolve(chunk.path().getFileName() + ".srt");
             // Retain the engine output for each chunk. The library publishes the completed transcript.
-            Path work = Files.createTempDirectory(recording.directory(), "asr-");
-            Path input = work.resolve("audio.wav");
+            Path work = Files.createTempDirectory(recording.directory(), "asr-").toAbsolutePath();
+            Path converted = work.resolve("audio.wav");
             Path output = work.resolve("result");
             try {
-                convertToWhisperPcm(chunk.path(), input);
-                var command = new ArrayList<>(List.of(whisper.toString(), "-m", model.toString(),
-                        "-f", input.toString(), "-l", "ru", "-osrt", "-of", output.toString()));
-                if (cpu) command.add("-ng");
-                Process process = new ProcessBuilder(command).redirectOutput(ProcessBuilder.Redirect.DISCARD)
-                        .redirectError(ProcessBuilder.Redirect.DISCARD).start();
-                try {
-                    if (!process.waitFor(30, TimeUnit.MINUTES) || process.exitValue() != 0) {
-                        throw new IOException("whisper-cli не завершил распознавание. Проверьте модель и режим CPU.");
-                    }
-                } finally {
-                    if (process.isAlive()) process.destroyForcibly().waitFor();
+                Path input = chunk.path().toAbsolutePath();
+                if (!bundled) {
+                    convertToWhisperPcm(input, converted);
+                    input = converted;
                 }
+                active = runWhisper(active, fallback, input, output, Duration.ofMinutes(30));
                 Path result = work.resolve("result.srt");
                 if (!Files.isRegularFile(result)) throw new IOException("whisper-cli не создал файл SRT.");
                 String srt = Files.readString(result, StandardCharsets.UTF_8);
@@ -66,14 +89,61 @@ final class LocalProcessing {
                 writeAtomic(checkpoint, srt);
             } finally {
                 Files.deleteIfExists(work.resolve("result.srt"));
-                Files.deleteIfExists(input);
+                Files.deleteIfExists(converted);
                 Files.deleteIfExists(work);
             }
+        }
+        if (!hasSignal) throw new IOException("В записи нет звукового сигнала.");
+        if (!containsSpeech(segments)) {
+            throw new IOException("Whisper не распознал речь. Проверьте, слышна ли речь в записи, и повторите распознавание.");
         }
         return List.copyOf(segments);
     }
 
-    static void convertToWhisperPcm(Path source, Path target) throws Exception {
+    static boolean containsSpeech(List<Segment> segments) {
+        return segments.stream().anyMatch(segment -> SOUND_MARKER.matcher(segment.text()).replaceAll("")
+                .codePoints().anyMatch(Character::isLetterOrDigit));
+    }
+
+    static boolean supportsNativeWav(Whisper engine) {
+        return engine.executable().equals(bundledWhisper(true).executable())
+                || engine.executable().equals(bundledWhisper(false).executable());
+    }
+
+    static Whisper cpuFallback(Whisper engine) {
+        if (!engine.executable().equals(bundledWhisper(false).executable())) return null;
+        return new Whisper(bundledWhisper(true).executable(), engine.model(), true);
+    }
+
+    static Whisper runWhisper(Whisper engine, Whisper fallback, Path input, Path output, Duration timeout)
+            throws IOException, InterruptedException {
+        try {
+            invokeWhisper(engine, input, output, timeout);
+            return engine;
+        } catch (IOException failure) {
+            if (fallback == null || engine.cpu() || !fallback.available()) throw failure;
+            Files.deleteIfExists(output.resolveSibling(output.getFileName() + ".srt"));
+            invokeWhisper(fallback, input, output, timeout);
+            return fallback;
+        }
+    }
+
+    private static void invokeWhisper(Whisper engine, Path input, Path output, Duration timeout)
+            throws IOException, InterruptedException {
+        var command = new ArrayList<>(List.of(engine.executable().toString(), "-m", engine.model().toString(),
+                "-f", input.toString(), "-l", "ru", "-osrt", "-of", output.toString()));
+        if (engine.cpu()) command.add("-ng");
+        Process process = new ProcessBuilder(command).directory(engine.executable().getParent().toFile())
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start();
+        try {
+            if (!process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS) || process.exitValue() != 0) {
+                throw new IOException("whisper-cli не завершил распознавание. Проверьте модель и режим CPU.");
+            }
+        } finally {
+            if (process.isAlive()) process.destroyForcibly().waitFor();
+        }
+    }
+    static void convertToWhisperPcm(Path source, Path target) throws IOException, UnsupportedAudioFileException {
         var mono = new AudioFormat(16000, 16, 1, true, false);
         try (var original = AudioSystem.getAudioInputStream(source.toFile());
              var converted = AudioSystem.getAudioInputStream(mono, original)) {
@@ -83,7 +153,8 @@ final class LocalProcessing {
 
     static List<Segment> parseSrt(String srt, long offset, long end) {
         var segments = new ArrayList<Segment>();
-        for (String block : srt.strip().split("\\R\\h*\\R")) {
+        // Normalize Windows line endings before splitting on blank lines.
+        for (String block : srt.replace("\r\n", "\n").strip().split("\\R\\h*\\R")) {
             var lines = block.lines().toList();
             if (lines.size() < 3) continue;
             var times = CUE.matcher(lines.get(1));

@@ -3,6 +3,8 @@ package org.example;
 import java.util.List;
 
 final class LibrarySchema {
+    static final String V2 = "ALTER TABLE lecture ADD COLUMN invitation_dpapi BLOB";
+
     static final List<String> V1 = List.of(
             """
             CREATE TABLE subject (

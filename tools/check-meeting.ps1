@@ -1,7 +1,13 @@
+param([string]$AppDirectory)
+
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
-& (Join-Path $PSScriptRoot 'build.ps1')
-$app = Join-Path $project 'target/standalone-app'
+if ($AppDirectory) {
+    $app = (Resolve-Path -LiteralPath $AppDirectory).Path
+} else {
+    & (Join-Path $PSScriptRoot 'build.ps1')
+    $app = Join-Path $project 'target/standalone-app'
+}
 $work = Join-Path $project ('target/meeting-check/' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 

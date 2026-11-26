@@ -3,6 +3,7 @@ package org.example;
 import com.microsoft.playwright.BrowserType;
 import com.microsoft.playwright.Playwright;
 import com.microsoft.playwright.Route;
+import com.microsoft.playwright.options.AriaRole;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.net.URI;
@@ -21,12 +22,16 @@ public class MeetingCheck {
             <button aria-label="Выйти из встречи">×</button>
             <button>Участники</button>
             """;
+    private static final String GUEST_ROOM = """
+            <nav><button>Войти</button></nav>
+            <header><div>Видеовстреча</div><div>01:34</div></header>
+            """;
 
     public static void main(String[] args) throws Exception {
         Path work = Path.of(args[0]).toAbsolutePath();
         checkScreens();
         checkBrowser(work);
-        System.out.println("Meeting screen detection, isolated Chrome PID, media permissions and profile cleanup verified.");
+        System.out.println("Meeting screen detection, incoming WebRTC sound, media permissions and profile cleanup verified.");
     }
 
     private static void checkScreens() {
@@ -58,11 +63,31 @@ public class MeetingCheck {
             page.navigate("https://other.salutejazz.ru/test-meeting");
             page.setContent(ROOM);
             expect(State.AUTHENTICATING, SaluteJazzPage.observe(page, INVITATION));
+
+            var guestInvitation = MeetingBrowser.invitation("https://salutejazz.ru/calls/test");
+            page.navigate(guestInvitation.toString());
+            page.setContent(GUEST_ROOM);
+            expect(State.IN_CALL, SaluteJazzPage.observe(page, guestInvitation));
+            var oldInvitation = MeetingBrowser.invitation("https://jazz.sber.ru/calls/test");
+            expect(State.IN_CALL, SaluteJazzPage.observe(page, oldInvitation));
+            page.setContent(GUEST_ROOM + "<button>Подключиться</button>");
+            expect(State.PREJOIN, SaluteJazzPage.observe(page, guestInvitation));
+            page.setContent(GUEST_ROOM + "<input type=email>");
+            expect(State.AUTHENTICATING, SaluteJazzPage.observe(page, guestInvitation));
+            page.setContent("<nav><button>Войти</button></nav><header>Семинар</header>");
+            expect(State.WAITING_USER, SaluteJazzPage.observe(page, guestInvitation));
+            page.navigate("https://salutejazz.ru/");
+            page.setContent(GUEST_ROOM);
+            expect(State.WAITING_USER, SaluteJazzPage.observe(page, guestInvitation));
+            page.navigate("https://other.salutejazz.ru/calls/test");
+            page.setContent(GUEST_ROOM);
+            expect(State.AUTHENTICATING, SaluteJazzPage.observe(page, guestInvitation));
         }
     }
 
     private static void checkBrowser(Path work) throws Exception {
         var received = new CompletableFuture<String>();
+        var playing = new CompletableFuture<Void>();
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/permission", exchange -> {
             try (exchange) {
@@ -70,10 +95,47 @@ public class MeetingCheck {
                 exchange.sendResponseHeaders(204, -1);
             }
         });
+        server.createContext("/playing", exchange -> {
+            try (exchange) {
+                playing.complete(null);
+                exchange.sendResponseHeaders(204, -1);
+            }
+        });
         server.createContext("/", exchange -> {
             try (exchange) {
                 byte[] body = """
-                        <!doctype html><script type="module">
+                        <!doctype html><button>Play tone</button><audio autoplay></audio><script type="module">
+                        async function localDescription(peer, description) {
+                            await peer.setLocalDescription(description);
+                            if (peer.iceGatheringState !== "complete") {
+                                await new Promise(resolve => {
+                                    peer.addEventListener("icegatheringstatechange", () => {
+                                        if (peer.iceGatheringState === "complete") resolve();
+                                    });
+                                });
+                            }
+                            return peer.localDescription;
+                        }
+                        document.querySelector("button").addEventListener("click", async () => {
+                            const audio = new AudioContext();
+                            const tone = audio.createOscillator();
+                            const source = audio.createMediaStreamDestination();
+                            const gain = audio.createGain();
+                            gain.gain.value = 0.1;
+                            tone.connect(gain).connect(source);
+                            await audio.resume();
+                            const sender = new RTCPeerConnection();
+                            const receiver = new RTCPeerConnection();
+                            const output = document.querySelector("audio");
+                            receiver.ontrack = event => { output.srcObject = event.streams[0]; };
+                            sender.addTrack(source.stream.getAudioTracks()[0], source.stream);
+                            await receiver.setRemoteDescription(await localDescription(sender, await sender.createOffer()));
+                            await sender.setRemoteDescription(await localDescription(receiver, await receiver.createAnswer()));
+                            tone.start();
+                            tone.stop(audio.currentTime + 4);
+                            await output.play();
+                            await fetch("/playing");
+                        });
                         const mic = await navigator.permissions.query({name:"microphone"});
                         const camera = await navigator.permissions.query({name:"camera"});
                         await fetch("/permission?mic=" + mic.state + "&camera=" + camera.state);
@@ -96,9 +158,16 @@ public class MeetingCheck {
                     var started = CompletableFuture.supplyAsync(() -> helper.inputReader().lines().findFirst().orElse(""));
                     expect("{\"event\":\"started\",\"pid\":" + meeting.process().pid() + "}",
                             started.get(10, TimeUnit.SECONDS));
+                    meeting.controlledPage().getByRole(AriaRole.BUTTON).click();
+                    playing.get(10, TimeUnit.SECONDS);
+                    Thread.sleep(1_500);
                     helper.getOutputStream().close();
                     if (!helper.waitFor(10, TimeUnit.SECONDS)) throw new AssertionError("Audio helper did not stop.");
                     expect(0, helper.exitValue());
+                    var chunks = new Recording(recording).chunks();
+                    if (chunks.isEmpty() || Recording.isDigitalSilence(chunks.getFirst().path())) {
+                        throw new AssertionError("WASAPI did not record the tone from the isolated Chrome.");
+                    }
                     if (!meeting.process().isAlive()) throw new AssertionError("Stopping capture closed Chrome.");
                 } finally {
                     if (helper.isAlive()) helper.destroyForcibly();

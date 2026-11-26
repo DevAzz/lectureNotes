@@ -188,6 +188,10 @@ final class LibraryPanel extends VBox {
         return location.isBlank() ? hit.lecture().label() : hit.lecture().label() + "\n" + location;
     }
 
+    LocalProcessing.Whisper whisper() {
+        return documents.whisper();
+    }
+
     void initialize() {
         worker.execute(() -> {
             try {

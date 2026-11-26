@@ -98,13 +98,16 @@ final class LectureLibrary implements AutoCloseable {
             rows.next();
             version = rows.getInt(1);
         }
-        if (version == 1) return;
-        if (version != 0) throw new IOException("Библиотека создана более новой версией приложения.");
+        if (version == 2) return;
+        if (version != 0 && version != 1) throw new IOException("Библиотека создана более новой версией приложения.");
         transaction(() -> {
             try (var statement = db.createStatement()) {
-                for (String sql : LibrarySchema.V1) statement.execute(sql);
-                importPrototype();
-                statement.execute("PRAGMA user_version = 1");
+                if (version == 0) {
+                    for (String sql : LibrarySchema.V1) statement.execute(sql);
+                    importPrototype();
+                }
+                statement.execute(LibrarySchema.V2);
+                statement.execute("PRAGMA user_version = 2");
             }
             return null;
         });
@@ -201,11 +204,17 @@ final class LectureLibrary implements AutoCloseable {
 
     synchronized String createLecture(String subject, String title, String topic, String focus)
             throws SQLException, IOException {
+        return createLecture(subject, title, topic, focus, null);
+    }
+
+    synchronized String createLecture(String subject, String title, String topic, String focus, byte[] invitation)
+            throws SQLException, IOException {
         String subjectName = required(subject, "Введите предмет.");
         String name = required(title, "Введите название лекции.");
         return transaction(() -> {
             String id = UUID.randomUUID().toString();
             insertLecture(id, ensureSubject(subjectName), name, topic.strip(), focus.strip(), Instant.now(), "DRAFT");
+            if (invitation != null) update("UPDATE lecture SET invitation_dpapi=? WHERE id=?", invitation, id);
             return id;
         });
     }
@@ -221,6 +230,16 @@ final class LectureLibrary implements AutoCloseable {
 
     synchronized void editLecture(String id, String subject, String title, String topic, String focus)
             throws SQLException, IOException {
+        editLecture(id, subject, title, topic, focus, false, null);
+    }
+
+    synchronized void editMeetingCard(String id, String subject, String title, String topic, String focus,
+                                      byte[] invitation) throws SQLException, IOException {
+        editLecture(id, subject, title, topic, focus, true, invitation);
+    }
+
+    private void editLecture(String id, String subject, String title, String topic, String focus,
+                             boolean replaceInvitation, byte[] invitation) throws SQLException, IOException {
         String subjectName = required(subject, "Введите предмет.");
         String name = required(title, "Введите название лекции.");
         transaction(() -> {
@@ -229,10 +248,19 @@ final class LectureLibrary implements AutoCloseable {
                     WHERE id=? AND state NOT IN ('RECORDING','STOPPING')
                     """, ensureSubject(subjectName), name, RussianSearch.normalize(name), topic.strip(), focus.strip(), id)
                     != 1) throw new IOException("Карточка недоступна для изменения.");
+            if (replaceInvitation) update("UPDATE lecture SET invitation_dpapi=? WHERE id=?", invitation, id);
             clearIndex(id, Kind.CARD);
             index(id, Kind.CARD, null, name + "\n" + topic.strip());
             return null;
         });
+    }
+
+    synchronized byte[] encryptedInvitation(String id) throws SQLException, IOException {
+        try (var query = prepare("SELECT invitation_dpapi FROM lecture WHERE id=?", id);
+             var rows = query.executeQuery()) {
+            if (!rows.next()) throw new IOException("Карточка лекции не найдена.");
+            return rows.getBytes(1);
+        }
     }
 
     Path recordingsPath(String id) {
@@ -244,12 +272,13 @@ final class LectureLibrary implements AutoCloseable {
         return id.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     }
 
-    synchronized Recording startRecording(String id) throws SQLException, IOException {
+    synchronized Recording startRecording(String id, Instant permissionAt, String permissionBasis)
+            throws SQLException, IOException {
         Path directory = recordingsPath(id);
         if (update("""
                 UPDATE lecture SET state='RECORDING', permission_at=?, permission_basis=?, capture_stopped_at=NULL
                 WHERE id=? AND state IN ('DRAFT','EMPTY')
-                """, System.currentTimeMillis(), "Подтверждение пользователя", id) != 1) {
+                """, permissionAt.toEpochMilli(), permissionBasis, id) != 1) {
             throw new IOException("Для этой карточки уже есть запись.");
         }
         try {

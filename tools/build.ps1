@@ -1,9 +1,9 @@
-param([switch]$AppImage)
+param([switch]$AppImage, [switch]$FullWhisper)
 
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
 $output = Join-Path $project 'target'
-$appInput = Join-Path $output 'standalone-app'
+$appInput = Join-Path $output $(if ($FullWhisper) { 'standalone-app-full' } else { 'standalone-app' })
 $libraries = Join-Path $appInput 'lib'
 New-Item -ItemType Directory -Path $appInput,$libraries -Force | Out-Null
 
@@ -16,6 +16,7 @@ Copy-Item -LiteralPath (Join-Path $output 'lectureNotes-1.0-SNAPSHOT.jar') -Dest
 Get-ChildItem -LiteralPath (Join-Path $output 'lib') -Filter '*.jar' |
     Copy-Item -Destination $libraries
 Copy-Item -LiteralPath (Join-Path $output 'native/audio-capture.exe') -Destination $appInput
+& (Join-Path $PSScriptRoot 'build-whisper.ps1') -Destination (Join-Path $appInput 'whisper') -Full:$FullWhisper
 $fxModules = 'javafx.controls,javafx.media'
 $nativeAccess = '--enable-native-access=javafx.graphics,javafx.media,ALL-UNNAMED'
 & java --module-path $libraries --add-modules $fxModules "$nativeAccess,org.xerial.sqlitejdbc" -jar $jar --check
