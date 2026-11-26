@@ -6,6 +6,7 @@ import javax.sound.sampled.UnsupportedAudioFileException;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -61,6 +62,17 @@ record Recording(Path directory) {
                 if (CHUNK_NAME.matcher(file.getFileName().toString()).matches()
                         && Files.size(file) < HEADER_BYTES + FRAME_BYTES) {
                     Files.deleteIfExists(file);
+                }
+            }
+        }
+    }
+
+    void deleteOriginalWavs() throws IOException {
+        try (var entries = Files.list(directory)) {
+            for (Path path : entries.toList()) {
+                var match = CHUNK_NAME.matcher(path.getFileName().toString());
+                if (match.matches() && match.group(2) == null && Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                    Files.deleteIfExists(path);
                 }
             }
         }

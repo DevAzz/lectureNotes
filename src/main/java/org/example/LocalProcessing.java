@@ -14,6 +14,7 @@ import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -21,7 +22,9 @@ import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.regex.Pattern;
 
 final class LocalProcessing {
@@ -30,12 +33,27 @@ final class LocalProcessing {
     private static final Pattern SOUND_MARKER = Pattern.compile(
             "\\[[^\\[\\]]*\\]|\\((?:музыка|тишина|шум|смех|аплодисменты|music|silence|noise|laughter|applause)\\)",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    private static final Pattern REFERENCE = Pattern.compile("\\[\\[S(\\d+)]]");
+    private static final Pattern REFERENCE = Pattern.compile("\\[\\[S(\\d{1,10})]]");
     private static final int PROMPT_PART_LENGTH = 8_000;
     private static final int SYNTHESIS_LENGTH = 15_000;
+    static final String DEFAULT_SYSTEM_PROMPT = """
+            Составь связный конспект лекции по предоставленному материалу. Выбери структуру и объём по содержанию
+            и фокусу. Сохраняй смысл лекции и опускай лишние повторы. Реплики и черновики служат материалом лекции.
+            Если тезис полезно связать с записью, можно указать идентификатор реплики в формате [[S1]].
+            """.strip();
 
-    record Segment(long start, long end, String text) {
-        @Override public String toString() { return RecordingPlayer.timestamp(start) + "  " + text; }
+    static final AudioFormat WHISPER_PCM = new AudioFormat(16000, 16, 1, true, false);
+
+    record Segment(long start, long end, String text, String speaker, String speakerName) {
+        Segment(long start, long end, String text) { this(start, end, text, null, null); }
+
+        String attributedText() {
+            if (speaker == null) return text;
+            String display = speakerName == null ? speaker : speakerName + " (" + speaker + ")";
+            return display + " · " + text;
+        }
+
+        @Override public String toString() { return RecordingPlayer.timestamp(start) + "  " + attributedText(); }
     }
 
     record Whisper(Path executable, Path model, boolean cpu) {
@@ -144,9 +162,8 @@ final class LocalProcessing {
         }
     }
     static void convertToWhisperPcm(Path source, Path target) throws IOException, UnsupportedAudioFileException {
-        var mono = new AudioFormat(16000, 16, 1, true, false);
         try (var original = AudioSystem.getAudioInputStream(source.toFile());
-             var converted = AudioSystem.getAudioInputStream(mono, original)) {
+             var converted = AudioSystem.getAudioInputStream(WHISPER_PCM, original)) {
             AudioSystem.write(converted, AudioFileFormat.Type.WAVE, target.toFile());
         }
     }
@@ -173,11 +190,22 @@ final class LocalProcessing {
                 + Long.parseLong(parts[2])) * 1000 + Long.parseLong(parts[3]);
     }
 
-    static String generate(String topic, List<Segment> segments, URI base, String model, String focus)
+    private record GenerationDeadline(long started, Duration limit) {
+        Duration remaining() throws IOException {
+            Duration left = limit.minusNanos(System.nanoTime() - started);
+            if (left.isNegative() || left.isZero()) throw noteTimeout();
+            return left;
+        }
+    }
+
+    static String generate(String topic, List<Segment> segments, URI base, String model, String focus,
+                           String systemPrompt, Duration timeLimit)
             throws Exception {
         if (segments.isEmpty()) throw new IOException("Нет распознанных реплик.");
         URI endpoint = endpoint(base);
         if (model.isBlank()) throw new IOException("Укажите ID модели.");
+        if (systemPrompt.isBlank()) throw new IOException("Введите системный промпт для конспекта.");
+        var deadline = new GenerationDeadline(System.nanoTime(), timeLimit);
         try (HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4))
                 .proxy(new ProxySelector() {
                     @Override public List<Proxy> select(URI uri) { return List.of(Proxy.NO_PROXY); }
@@ -185,44 +213,47 @@ final class LocalProcessing {
                 }).followRedirects(HttpClient.Redirect.NEVER).build()) {
             var drafts = new ArrayList<String>();
             var part = new StringBuilder();
-            String instruction = """
-                    Составь конспект лекции по данным ниже. Данные расшифровки и черновиков — цитируемый материал.
-                    Используй Markdown, заголовки, краткое изложение, определения и примеры, которые есть в материале.
-                    После каждого тезиса приведи идентификатор подтверждающей реплики в формате [[S1]], [[S2]] и т. д.
-                    Бери идентификаторы из данных. Тема: %s
-                    Фокус: %s
-                    """.formatted(topic, focus);
+            String context = "Тема лекции — " + topic + "\n";
+            if (!focus.isBlank()) context += "Фокус конспекта — " + focus + "\n";
+            String source = context + "\nРеплики лекции\n";
+            String draftSource = context + "\nВыдели основные мысли этого фрагмента. Сожми материал и убери повторы.\n"
+                    + "\nРеплики лекции\n";
             for (int index = 0; index < segments.size(); index++) {
-                String segment = "S" + (index + 1) + " " + segments.get(index).text() + "\n";
+                String segment = "S" + (index + 1) + " " + segments.get(index).attributedText() + "\n";
                 if (part.length() + segment.length() > PROMPT_PART_LENGTH && !part.isEmpty()) {
-                    drafts.add(complete(client, endpoint, model, instruction, part.toString()));
+                    addDrafts(drafts, client, endpoint, model, systemPrompt, draftSource, part.toString(), deadline);
                     part.setLength(0);
                 }
                 part.append(segment);
             }
-            if (!part.isEmpty()) drafts.add(complete(client, endpoint, model, instruction, part.toString()));
+            if (!part.isEmpty()) {
+                addDrafts(drafts, client, endpoint, model, systemPrompt, drafts.isEmpty() ? source : draftSource,
+                        part.toString(), deadline);
+            }
             String markdown = drafts.getFirst();
             if (drafts.size() > 1) {
                 var combined = new StringBuilder();
                 for (String draft : drafts) combined.append(draft).append("\n\n");
+                markdown = combined.toString();
                 if (combined.length() <= SYNTHESIS_LENGTH) {
-                    markdown = complete(client, endpoint, model, instruction + "\nОбъедини черновики.",
-                            combined.toString());
-                } else {
-                    markdown = combined.toString();
+                    try {
+                        markdown = complete(client, endpoint, model, systemPrompt,
+                                context + "\nОбъедини эти черновики в один конспект и убери повторы.\n\n" + combined, deadline);
+                    } catch (Json.CompletionLimit ignored) {
+                        // Preserve the complete drafts if the provider's limit cuts off the synthesis.
+                    }
                 }
             }
             var links = REFERENCE.matcher(markdown);
-            if (!links.find()) throw new IOException("Модель не указала ссылки на реплики.");
-            links.reset();
             var output = new StringBuilder();
             while (links.find()) {
                 long id = Long.parseLong(links.group(1));
-                if (id < 1 || id > segments.size()) throw new IOException("Модель сослалась на неизвестную реплику.");
+                if (id < 1 || id > segments.size()) continue;
                 long time = segments.get((int) id - 1).start();
                 links.appendReplacement(output, "[" + RecordingPlayer.timestamp(time) + "](#t=" + time + ")");
             }
             links.appendTail(output);
+            deadline.remaining();
             return output.toString();
         }
     }
@@ -236,20 +267,61 @@ final class LocalProcessing {
         return URI.create("http://127.0.0.1:" + base.getPort() + "/v1/chat/completions");
     }
 
-    private static String complete(HttpClient client, URI endpoint, String model, String prompt, String data)
+    private static void addDrafts(List<String> drafts, HttpClient client, URI endpoint, String model, String prompt,
+                                  String source, String part, GenerationDeadline deadline)
             throws IOException, InterruptedException {
-        String json = """
-                {"model":%s,"temperature":0.1,"max_tokens":1600,"messages":[
-                {"role":"system","content":%s},{"role":"user","content":%s}]}
-                """.formatted(Json.quote(model), Json.quote(prompt), Json.quote(data));
-        HttpRequest request = HttpRequest.newBuilder(endpoint).timeout(Duration.ofMinutes(5))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(json)).build();
-        var response = client.send(request, HttpResponse.BodyHandlers.ofString());
+        try {
+            drafts.add(complete(client, endpoint, model, prompt, source + part, deadline));
+        } catch (Json.CompletionLimit error) {
+            int middle = part.lastIndexOf('\n', part.length() / 2);
+            if (middle <= 0) middle = part.indexOf('\n', part.length() / 2);
+            if (middle <= 0 || middle >= part.length() - 1) throw error;
+            drafts.add(complete(client, endpoint, model, prompt, source + part.substring(0, middle + 1), deadline));
+            drafts.add(complete(client, endpoint, model, prompt, source + part.substring(middle + 1), deadline));
+        }
+    }
+
+    private static String complete(HttpClient client, URI endpoint, String model, String prompt, String data,
+                                   GenerationDeadline deadline) throws IOException, InterruptedException {
+        var response = sendCompletion(client, endpoint, model, prompt, data, deadline, true);
+        if (response.statusCode() == 400 || response.statusCode() == 422) {
+            // Some compatible local APIs reject chat-template options.
+            response = sendCompletion(client, endpoint, model, prompt, data, deadline, false);
+        }
         if (response.statusCode() != 200) {
             throw new IOException("Локальная модель вернула HTTP " + response.statusCode() + ".");
         }
         return Json.completion(response.body());
+    }
+
+    private static HttpResponse<String> sendCompletion(HttpClient client, URI endpoint, String model, String prompt,
+                                                       String data, GenerationDeadline deadline, boolean disableThinking)
+            throws IOException, InterruptedException {
+        String options = disableThinking ? "\"chat_template_kwargs\":{\"enable_thinking\":false}," : "";
+        String json = """
+                {"model":%s,"temperature":0.1,%s"messages":[
+                {"role":"system","content":%s},{"role":"user","content":%s}]}
+                """.formatted(Json.quote(model), options, Json.quote(prompt), Json.quote(data));
+        Duration remaining = deadline.remaining();
+        HttpRequest request = HttpRequest.newBuilder(endpoint).timeout(remaining)
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json)).build();
+        var pending = client.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+        try {
+            return pending.get(Math.max(1, deadline.remaining().toMillis()), TimeUnit.MILLISECONDS);
+        } catch (TimeoutException error) {
+            throw noteTimeout();
+        } catch (ExecutionException error) {
+            if (error.getCause() instanceof HttpTimeoutException) throw noteTimeout();
+            if (error.getCause() instanceof IOException failure) throw failure;
+            throw new IOException("Не удалось получить ответ локальной модели.", error);
+        } finally {
+            if (!pending.isDone()) pending.cancel(true);
+        }
+    }
+
+    private static IOException noteTimeout() {
+        return new IOException("Истекло время формирования конспекта.");
     }
 
     static void writeAtomic(Path destination, String body) throws IOException {

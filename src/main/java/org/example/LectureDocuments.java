@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -46,6 +47,9 @@ final class LectureDocuments {
     private final Button recognize = new Button("Распознать");
     private final Button whisperSettings = new Button("Настройки Whisper");
     private final Button playLine = new Button("Прослушать реплику");
+    private final Button editLine = new Button("Изменить реплику");
+    private final Button diarize = new Button("Разметить спикеров");
+    private final Button renameSpeaker = new Button("Переименовать спикера");
     private final Button exportTranscript = new Button("Экспорт Markdown");
     private final Button generate = new Button("Сформировать конспект");
     private final Button save = new Button("Сохранить редакцию");
@@ -65,6 +69,8 @@ final class LectureDocuments {
     private LocalProcessing.Whisper whisper;
     private String endpoint = "http://127.0.0.1:47831/v1";
     private String model = "iq3_s";
+    private String systemPrompt = LocalProcessing.DEFAULT_SYSTEM_PROMPT;
+    private int noteTimeLimitMinutes = LectureLibrary.DEFAULT_NOTE_TIME_LIMIT_MINUTES;
 
     LectureDocuments(Window owner, RecordingPlayer player, LectureLibrary library, Runnable onPublished) {
         this.owner = owner;
@@ -96,12 +102,16 @@ final class LectureDocuments {
         recognize.setOnAction(event -> startRecognition());
         whisperSettings.setOnAction(event -> configureWhisper());
         playLine.setOnAction(event -> playSegment());
+        editLine.setOnAction(event -> editSegment());
+        diarize.setOnAction(event -> startDiarization());
+        renameSpeaker.setOnAction(event -> renameSpeaker());
         exportTranscript.setOnAction(event -> {
             var markdown = new StringBuilder("# ").append(selected.title()).append("\n\n");
             for (var segment : transcript.getItems()) markdown.append("- ").append(segment).append('\n');
             export("transcript.md", markdown.toString());
         });
-        var panel = new VBox(8, status, transcript, new HBox(8, recognize, whisperSettings, playLine, exportTranscript));
+        var panel = new VBox(8, status, transcript, new HBox(8, recognize, whisperSettings, exportTranscript),
+                new HBox(8, playLine, editLine), new HBox(8, diarize, renameSpeaker));
         panel.setPadding(new Insets(10));
         VBox.setVgrow(transcript, Priority.ALWAYS);
         updateButtons();
@@ -147,9 +157,13 @@ final class LectureDocuments {
         worker.execute(() -> {
             try {
                 var saved = library.documents(item.id());
+                String prompt = library.noteSystemPrompt();
+                int minutes = library.noteTimeLimitMinutes();
                 Platform.runLater(() -> {
                     if (closed || request != selection) return;
                     transcriptId = saved.transcriptId();
+                    systemPrompt = prompt;
+                    noteTimeLimitMinutes = minutes;
                     transcript.getItems().setAll(saved.segments());
                     selectRequestedSegment();
                     setNote(saved.note());
@@ -186,7 +200,27 @@ final class LectureDocuments {
 
     private void playSegment() {
         var segment = transcript.getSelectionModel().getSelectedItem();
-        if (segment != null) player.seek(segment.start(), true);
+        if (segment != null && selected != null && selected.hasAudio()) player.seek(segment.start(), true);
+    }
+
+    private void editSegment() {
+        int index = transcript.getSelectionModel().getSelectedIndex();
+        var segment = transcript.getSelectionModel().getSelectedItem();
+        if (segment == null || transcriptId == null) return;
+        String text = DesktopDialogs.editSegment(owner, segment);
+        if (text == null || text.equals(segment.text())) return;
+        String id = selected.id();
+        long expectedVersion = transcriptId;
+        run("Сохраняем исправленную реплику", () -> {
+            long version = library.editTranscriptSegment(id, expectedVersion, index, text);
+            return () -> {
+                transcriptId = version;
+                transcript.getItems().set(index,
+                        new LocalProcessing.Segment(segment.start(), segment.end(), text,
+                                segment.speaker(), segment.speakerName()));
+                transcript.getSelectionModel().select(index);
+            };
+        }, true);
     }
 
     private void playReference() {
@@ -245,6 +279,53 @@ final class LectureDocuments {
         }, true);
     }
 
+    private void startDiarization() {
+        String id = selected.id();
+        long expectedVersion = transcriptId;
+        var source = List.copyOf(transcript.getItems());
+        if (source.stream().anyMatch(segment -> segment.speaker() != null)
+                && !DesktopDialogs.confirm(owner, "Разметка спикеров", "Заменить текущие метки спикеров?")) return;
+        int index = transcript.getSelectionModel().getSelectedIndex();
+        run("Определяем спикеров по записи", () -> {
+            var labeled = SpeakerDiarization.label(new Recording(library.recordingsPath(id)), source);
+            long version = library.replaceTranscript(id, expectedVersion, labeled);
+            return () -> showLabeledTranscript(version, labeled, index);
+        }, true);
+    }
+
+    private void renameSpeaker() {
+        int index = transcript.getSelectionModel().getSelectedIndex();
+        var line = transcript.getSelectionModel().getSelectedItem();
+        String speaker = line.speaker();
+        var name = new TextField(line.speakerName() == null ? "" : line.speakerName());
+        name.setPromptText(speaker);
+        name.setPrefColumnCount(30);
+        if (!DesktopDialogs.form(owner, "Имя спикера для всех его реплик", name)) return;
+        String entered = name.getText().strip();
+        String label = entered.isEmpty() ? null : entered;
+        if (Objects.equals(label, line.speakerName())) return;
+        String id = selected.id();
+        long expectedVersion = transcriptId;
+        var renamed = transcript.getItems().stream()
+                .map(segment -> speaker.equals(segment.speaker())
+                        ? new LocalProcessing.Segment(segment.start(), segment.end(), segment.text(), speaker, label)
+                        : segment)
+                .toList();
+        run("Сохраняем имя спикера", () -> {
+            long version = library.replaceTranscript(id, expectedVersion, renamed);
+            return () -> showLabeledTranscript(version, renamed, index);
+        }, true);
+    }
+
+    private void showLabeledTranscript(long version, List<LocalProcessing.Segment> segments, int index) {
+        transcriptId = version;
+        transcript.getItems().setAll(segments);
+        if (index >= 0) {
+            transcript.getSelectionModel().select(index);
+            transcript.scrollTo(index);
+        }
+    }
+
     private void startGeneration() {
         if (dirty()) {
             DesktopDialogs.notice(owner, "Сохраните текущую редакцию перед генерацией.");
@@ -253,10 +334,17 @@ final class LectureDocuments {
         var address = new TextField(endpoint);
         var name = new TextField(model);
         var focus = new TextField(selected.focus());
+        var timeLimit = new TextField(Integer.toString(noteTimeLimitMinutes));
+        var prompt = new TextArea(systemPrompt);
+        prompt.setWrapText(true);
+        prompt.setPrefColumnCount(56);
+        prompt.setPrefRowCount(8);
         var settings = DesktopDialogs.fields();
         DesktopDialogs.field(settings, 0, "Локальный API", address);
         DesktopDialogs.field(settings, 1, "ID модели", name);
         DesktopDialogs.field(settings, 2, "Фокус", focus);
+        DesktopDialogs.field(settings, 3, "Лимит времени, мин", timeLimit);
+        DesktopDialogs.field(settings, 4, "Системный промпт", prompt);
         if (!DesktopDialogs.form(owner, "Сформировать конспект", settings)) return;
         endpoint = address.getText().strip();
         model = name.getText().strip();
@@ -271,9 +359,25 @@ final class LectureDocuments {
         Long sourceId = transcriptId;
         String modelId = model;
         String requestedFocus = focus.getText().strip();
+        String requestedPrompt = prompt.getText();
+        if (requestedPrompt.isBlank()) {
+            DesktopDialogs.notice(owner, "Введите системный промпт для конспекта.");
+            return;
+        }
+        int minutes;
+        try {
+            minutes = Integer.parseInt(timeLimit.getText().strip());
+            if (minutes <= 0) throw new NumberFormatException();
+        } catch (NumberFormatException error) {
+            DesktopDialogs.notice(owner, "Укажите положительное целое число минут.");
+            return;
+        }
+        systemPrompt = requestedPrompt;
+        noteTimeLimitMinutes = minutes;
         run("Формируем конспект", () -> {
+            library.saveNoteSettings(requestedPrompt, minutes);
             String markdown = LocalProcessing.generate(item.topic().isBlank() ? item.title() : item.topic(),
-                    source, base, modelId, requestedFocus);
+                    source, base, modelId, requestedFocus, requestedPrompt, java.time.Duration.ofMinutes(minutes));
             library.saveNote(item.id(), sourceId, markdown, true);
             return () -> setNote(new LectureLibrary.Note(sourceId, markdown));
         }, true);
@@ -387,7 +491,12 @@ final class LectureDocuments {
         note.setEditable(available);
         recognize.setDisable(!available || !selected.hasAudio());
         whisperSettings.setDisable(busy.get());
-        playLine.setDisable(transcript.getSelectionModel().getSelectedItem() == null);
+        playLine.setDisable(!available || !selected.hasAudio() || transcript.getSelectionModel().isEmpty());
+        editLine.setDisable(!available || transcriptId == null || transcript.getSelectionModel().isEmpty());
+        diarize.setDisable(!available || !selected.hasAudio() || transcriptId == null || transcript.getItems().isEmpty());
+        var line = transcript.getSelectionModel().getSelectedItem();
+        renameSpeaker.setDisable(!available || transcriptId == null || line == null
+                || !SpeakerDiarization.canName(line.speaker()));
         exportTranscript.setDisable(!available || transcript.getItems().isEmpty());
         generate.setDisable(!available || transcript.getItems().isEmpty());
         save.setDisable(!available || !dirty());

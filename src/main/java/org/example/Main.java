@@ -7,9 +7,6 @@ import java.nio.file.Path;
 
 public class Main {
     public static void main(String[] args) throws Exception {
-        Path data = Path.of(System.getProperty("lecturenotes.data",
-                Path.of(System.getenv().getOrDefault("LOCALAPPDATA", System.getProperty("user.home")),
-                        "LectureNotes").toString()));
         if (args.length == 1 && args[0].equals("--check")) {
             System.out.println("JDK " + Runtime.version().feature() + ", audio helper: " + Capture.helper());
             var whisper = LocalProcessing.bundledWhisper(false);
@@ -26,9 +23,11 @@ public class Main {
             }
             return;
         }
-        Path directory = data.toAbsolutePath().normalize();
+        var location = LibraryLocation.forCurrentUser();
+        Path directory;
         LectureLibrary library;
         try {
+            directory = location.dataDirectory(System.getProperty("lecturenotes.data"));
             library = new LectureLibrary(directory);
         } catch (Exception error) {
             String message = error instanceof java.io.IOException ? error.getMessage() : "Не удалось открыть библиотеку.";
@@ -38,7 +37,7 @@ public class Main {
         try {
             Platform.startup(() -> Platform.runLater(() -> {
                 try {
-                    new DesktopWindow(directory, library).show();
+                    new DesktopWindow(directory, library, location).show();
                 } catch (RuntimeException error) {
                     try { library.close(); } catch (Exception failure) { error.addSuppressed(failure); }
                     showError("Не удалось открыть окно приложения.");

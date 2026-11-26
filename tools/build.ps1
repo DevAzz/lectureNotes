@@ -17,6 +17,7 @@ Get-ChildItem -LiteralPath (Join-Path $output 'lib') -Filter '*.jar' |
     Copy-Item -Destination $libraries
 Copy-Item -LiteralPath (Join-Path $output 'native/audio-capture.exe') -Destination $appInput
 & (Join-Path $PSScriptRoot 'build-whisper.ps1') -Destination (Join-Path $appInput 'whisper') -Full:$FullWhisper
+& (Join-Path $PSScriptRoot 'build-diarization.ps1') -Destination (Join-Path $appInput 'diarization')
 $fxModules = 'javafx.controls,javafx.media'
 $nativeAccess = '--enable-native-access=javafx.graphics,javafx.media,ALL-UNNAMED'
 & java --module-path $libraries --add-modules $fxModules "$nativeAccess,org.xerial.sqlitejdbc" -jar $jar --check

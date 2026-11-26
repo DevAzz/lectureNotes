@@ -11,9 +11,13 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.List;
-import java.util.function.Consumer;
 
 final class LiveTranscription {
+    @FunctionalInterface
+    interface SegmentSink {
+        void accept(List<LocalProcessing.Segment> segments) throws IOException;
+    }
+
     private static final long WINDOW_FRAMES = 8L * Recording.SAMPLE_RATE;
     private static final long MIN_TAIL_FRAMES = Recording.SAMPLE_RATE;
 
@@ -22,7 +26,7 @@ final class LiveTranscription {
     }
 
     static void follow(Recording recording, LocalProcessing.Whisper selected,
-                       Consumer<List<LocalProcessing.Segment>> publish)
+                       SegmentSink publish)
             throws IOException, InterruptedException {
         var fallback = LocalProcessing.cpuFallback(selected);
         var engine = fallback != null && selected.cpu() ? fallback : selected;

@@ -7,6 +7,12 @@ import java.util.List;
 import java.util.Map;
 
 final class Json {
+    static final class CompletionLimit extends IOException {
+        CompletionLimit() {
+            super("Локальная модель исчерпала лимит ответа. Конспект обрезан.");
+        }
+    }
+
     private final String input;
     private int position;
 
@@ -37,11 +43,13 @@ final class Json {
         parser.skipSpace();
         if (parser.position == input.length() && parsed instanceof Map<?, ?> root
                 && root.get("choices") instanceof List<?> choices && !choices.isEmpty()
-                && choices.getFirst() instanceof Map<?, ?> choice
-                && "stop".equals(choice.get("finish_reason"))
-                && choice.get("message") instanceof Map<?, ?> message
-                && message.get("content") instanceof String content && !content.isBlank()) {
-            return content;
+                && choices.getFirst() instanceof Map<?, ?> choice) {
+            if ("length".equals(choice.get("finish_reason"))) throw new CompletionLimit();
+            if ("stop".equals(choice.get("finish_reason"))
+                    && choice.get("message") instanceof Map<?, ?> message
+                    && message.get("content") instanceof String content && !content.isBlank()) {
+                return content;
+            }
         }
         throw invalid();
     }

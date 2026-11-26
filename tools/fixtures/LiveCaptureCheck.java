@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.DriverManager;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -86,17 +87,25 @@ final class LiveCaptureCheck {
             check(library.encryptedInvitation(OLD_CARD) == null, "Existing lecture has no saved invitation");
             var secret = InvitationSecret.protect(MeetingBrowser.invitation(link));
             id = library.createLecture("История", "Тест", "", "", secret);
+            library.startRecording(id, Instant.now(), "Контрольная запись");
+            library.appendLiveSegments(id, List.of(new LocalProcessing.Segment(250, 950, "Живая реплика.")));
+            library.finishRecording(id, "PARTIAL");
+            library.saveNoteSystemPrompt("Напиши конспект свободным текстом.");
         }
         try (var library = new LectureLibrary(directory)) {
             library.editLecture(id, "История", "Изменённое название", "", "");
             check(link.equals(InvitationSecret.unprotect(library.encryptedInvitation(id))),
                     "Saved link survives restart and unrelated card edits");
+            check(library.liveSegments(id).getFirst().segment().equals(
+                    new LocalProcessing.Segment(250, 950, "Живая реплика.")), "Live transcript survives restart");
+            check(library.noteSystemPrompt().equals("Напиши конспект свободным текстом."),
+                    "Custom system prompt survives restart");
             check(!new String(Files.readAllBytes(database), StandardCharsets.ISO_8859_1).contains(link),
                     "SQLite does not contain plaintext link");
             library.editMeetingCard(id, "История", "Изменённое название", "", "", null);
             check(library.encryptedInvitation(id) == null, "Clearing the field removes the saved link");
         }
-        System.out.println("V1 migration, DPAPI invitation persistence, and link removal verified.");
+        System.out.println("V1 migration, protected invitations, live drafts and prompt persistence verified.");
     }
 
     private static void checkLive(Path work, Path wav) throws Exception {

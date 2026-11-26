@@ -22,15 +22,16 @@ import java.util.List;
 import java.util.UUID;
 
 final class LectureLibrary implements AutoCloseable {
+    static final int DEFAULT_NOTE_TIME_LIMIT_MINUTES = 60;
     record Subject(long id, String name, String description) {
         @Override public String toString() { return name; }
     }
 
     record Lecture(String id, long subjectId, String subject, String title, String topic,
-                   String focus, Instant created, String state, boolean hasNote) {
+                   String focus, Instant created, String state, boolean hasNote, boolean audioRemoved) {
         boolean capturing() { return state.equals("RECORDING") || state.equals("STOPPING"); }
         boolean canRecord() { return state.equals("DRAFT") || state.equals("EMPTY"); }
-        boolean hasAudio() { return state.equals("COMPLETE") || state.equals("PARTIAL"); }
+        boolean hasAudio() { return !audioRemoved && (state.equals("COMPLETE") || state.equals("PARTIAL")); }
         String label() { return subject + " · " + title; }
     }
 
@@ -39,11 +40,15 @@ final class LectureLibrary implements AutoCloseable {
     record Filters(Long subjectId, Instant since, Instant before, Boolean hasNote, String state, Sort sort) { }
     record Hit(Lecture lecture, Kind kind, int ordinal, long startMillis, String excerpt) { }
     record Documents(Long transcriptId, List<LocalProcessing.Segment> segments, Note note) { }
+    record LiveSegment(long id, LocalProcessing.Segment segment) {
+        @Override public String toString() { return segment.toString(); }
+    }
     record Note(Long transcriptId, String markdown) { }
     record NoteRevision(long id, Instant created, String source) { }
 
     private static final String LECTURE_COLUMNS = """
-            l.id, l.subject_id, s.name, l.title, l.topic, l.focus, l.created_at, l.state, l.current_note IS NOT NULL
+            l.id, l.subject_id, s.name, l.title, l.topic, l.focus, l.created_at, l.state,
+            l.current_note IS NOT NULL, l.audio_removed
             """.strip();
 
     private final Path recordings;
@@ -98,16 +103,17 @@ final class LectureLibrary implements AutoCloseable {
             rows.next();
             version = rows.getInt(1);
         }
-        if (version == 2) return;
-        if (version != 0 && version != 1) throw new IOException("Библиотека создана более новой версией приложения.");
+        if (version == 5) return;
+        if (version < 0 || version > 5) throw new IOException("Библиотека создана более новой версией приложения.");
         transaction(() -> {
             try (var statement = db.createStatement()) {
-                if (version == 0) {
-                    for (String sql : LibrarySchema.V1) statement.execute(sql);
-                    importPrototype();
-                }
-                statement.execute(LibrarySchema.V2);
-                statement.execute("PRAGMA user_version = 2");
+                if (version == 0) for (String sql : LibrarySchema.V1) statement.execute(sql);
+                if (version < 2) statement.execute(LibrarySchema.V2);
+                if (version < 3) for (String sql : LibrarySchema.V3) statement.execute(sql);
+                if (version < 4) for (String sql : LibrarySchema.V4) statement.execute(sql);
+                for (String sql : LibrarySchema.V5) statement.execute(sql);
+                if (version == 0) importPrototype();
+                statement.execute("PRAGMA user_version = 5");
             }
             return null;
         });
@@ -275,12 +281,16 @@ final class LectureLibrary implements AutoCloseable {
     synchronized Recording startRecording(String id, Instant permissionAt, String permissionBasis)
             throws SQLException, IOException {
         Path directory = recordingsPath(id);
-        if (update("""
-                UPDATE lecture SET state='RECORDING', permission_at=?, permission_basis=?, capture_stopped_at=NULL
-                WHERE id=? AND state IN ('DRAFT','EMPTY')
-                """, permissionAt.toEpochMilli(), permissionBasis, id) != 1) {
-            throw new IOException("Для этой карточки уже есть запись.");
-        }
+        transaction(() -> {
+            if (update("""
+                    UPDATE lecture SET state='RECORDING', permission_at=?, permission_basis=?, capture_stopped_at=NULL
+                    WHERE id=? AND state IN ('DRAFT','EMPTY')
+                    """, permissionAt.toEpochMilli(), permissionBasis, id) != 1) {
+                throw new IOException("Для этой карточки уже есть запись.");
+            }
+            update("DELETE FROM live_segment WHERE lecture_id=?", id);
+            return null;
+        });
         try {
             var recording = new Recording(Files.createDirectories(directory));
             recording.clearEmptyChunks();
@@ -346,7 +356,38 @@ final class LectureLibrary implements AutoCloseable {
                 complete = false;
             }
         }
+        for (String id : ids("SELECT lecture_id FROM audio_cleanup")) {
+            if (!cleanOriginalAudio(id)) complete = false;
+        }
         return complete;
+    }
+
+    synchronized boolean removeOriginalAudio(String id) throws SQLException, IOException {
+        transaction(() -> {
+            if (update("""
+                    UPDATE lecture SET audio_removed=1
+                    WHERE id=? AND audio_removed=0 AND state IN ('COMPLETE','PARTIAL')
+                    """, id) != 1) throw new IOException("WAV этой лекции недоступны для удаления.");
+            update("INSERT INTO audio_cleanup(lecture_id) VALUES (?)", id);
+            return null;
+        });
+        return cleanOriginalAudio(id);
+    }
+
+    private boolean cleanOriginalAudio(String id) throws SQLException {
+        Path path = recordingsPath(id);
+        try {
+            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                if (!path.toRealPath().equals(recordings.toRealPath().resolve(path.getFileName()))) {
+                    throw new IOException("Запись содержит перенаправление на другой каталог.");
+                }
+                new Recording(path).deleteOriginalWavs();
+            }
+            update("DELETE FROM audio_cleanup WHERE lecture_id=?", id);
+            return true;
+        } catch (IOException error) {
+            return false;
+        }
     }
 
     private void removeRecordingFiles(Path path) throws IOException {
@@ -392,7 +433,7 @@ final class LectureLibrary implements AutoCloseable {
     private static Lecture readLecture(ResultSet rows) throws SQLException {
         return new Lecture(rows.getString(1), rows.getLong(2), rows.getString(3), rows.getString(4),
                 rows.getString(5), rows.getString(6), Instant.ofEpochMilli(rows.getLong(7)),
-                rows.getString(8), rows.getBoolean(9));
+                rows.getString(8), rows.getBoolean(9), rows.getBoolean(10));
     }
 
     synchronized List<Hit> find(String input, Filters filter) throws SQLException, IOException {
@@ -433,9 +474,9 @@ final class LectureLibrary implements AutoCloseable {
         try (var statement = prepare(sql.toString(), args.toArray()); var rows = statement.executeQuery()) {
             while (rows.next()) {
                 Lecture lecture = readLecture(rows);
-                result.add(new Hit(lecture, matching ? Kind.valueOf(rows.getString(10)) : Kind.CARD,
-                        matching ? rows.getInt(11) : 0, matching ? rows.getLong(12) : 0,
-                        matching ? rows.getString(13) : ""));
+                result.add(new Hit(lecture, matching ? Kind.valueOf(rows.getString(11)) : Kind.CARD,
+                        matching ? rows.getInt(12) : 0, matching ? rows.getLong(13) : 0,
+                        matching ? rows.getString(14) : ""));
             }
         }
         return result;
@@ -454,6 +495,85 @@ final class LectureLibrary implements AutoCloseable {
         }
     }
 
+    synchronized String noteSystemPrompt() throws SQLException {
+        try (var sql = prepare("SELECT value FROM app_setting WHERE name='note_system_prompt'");
+             var rows = sql.executeQuery()) {
+            return rows.next() ? rows.getString(1) : LocalProcessing.DEFAULT_SYSTEM_PROMPT;
+        }
+    }
+
+    synchronized void saveNoteSystemPrompt(String prompt) throws SQLException, IOException {
+        if (prompt.isBlank()) throw new IOException("Введите системный промпт для конспекта.");
+        update("""
+                INSERT INTO app_setting(name, value) VALUES ('note_system_prompt', ?)
+                ON CONFLICT(name) DO UPDATE SET value=excluded.value
+                """, prompt);
+    }
+
+    synchronized int noteTimeLimitMinutes() throws SQLException {
+        try (var sql = prepare("SELECT value FROM app_setting WHERE name='note_time_limit_minutes'");
+             var rows = sql.executeQuery()) {
+            if (rows.next()) {
+                int saved = rows.getInt(1);
+                if (saved > 0) return saved;
+            }
+            return DEFAULT_NOTE_TIME_LIMIT_MINUTES;
+        }
+    }
+
+    synchronized void saveNoteSettings(String prompt, int minutes) throws SQLException, IOException {
+        if (minutes <= 0) throw new IOException("Укажите время формирования конспекта в минутах.");
+        transaction(() -> {
+            saveNoteSystemPrompt(prompt);
+            update("""
+                    INSERT INTO app_setting(name, value) VALUES ('note_time_limit_minutes', ?)
+                    ON CONFLICT(name) DO UPDATE SET value=excluded.value
+                    """, Integer.toString(minutes));
+            return null;
+        });
+    }
+
+    synchronized void appendLiveSegments(String id, List<LocalProcessing.Segment> segments)
+            throws SQLException, IOException {
+        if (segments.isEmpty()) return;
+        transaction(() -> {
+            try (var sql = db.prepareStatement("""
+                    INSERT INTO live_segment(lecture_id, start_ms, end_ms, raw_text)
+                    SELECT id, ?, ?, ? FROM lecture WHERE id=? AND state='RECORDING'
+                    """)) {
+                for (var segment : segments) {
+                    bind(sql, segment.start(), segment.end(), segment.text(), id);
+                    sql.addBatch();
+                }
+                sql.executeBatch();
+            }
+            return null;
+        });
+    }
+
+    synchronized List<LiveSegment> liveSegments(String id) throws SQLException {
+        var segments = new ArrayList<LiveSegment>();
+        try (var sql = prepare("""
+                SELECT id, start_ms, end_ms, raw_text FROM live_segment
+                WHERE lecture_id=? ORDER BY start_ms,id
+                """, id); var rows = sql.executeQuery()) {
+            while (rows.next()) {
+                segments.add(new LiveSegment(rows.getLong(1),
+                        new LocalProcessing.Segment(rows.getLong(2), rows.getLong(3), rows.getString(4))));
+            }
+        }
+        return List.copyOf(segments);
+    }
+
+    synchronized void editLiveSegment(String lectureId, long id, String text) throws SQLException, IOException {
+        if (update("""
+                UPDATE live_segment SET raw_text=? WHERE id=? AND lecture_id=?
+                  AND EXISTS (SELECT 1 FROM lecture WHERE id=? AND state IN ('COMPLETE','PARTIAL'))
+                """, required(text, "Введите текст реплики."), id, lectureId, lectureId) != 1) {
+            throw new IOException("Реплика недоступна для изменения.");
+        }
+    }
+
     private static Long nullableLong(ResultSet rows, int column) throws SQLException {
         long value = rows.getLong(column);
         return rows.wasNull() ? null : value;
@@ -463,10 +583,12 @@ final class LectureLibrary implements AutoCloseable {
         if (version == null) return List.of();
         var result = new ArrayList<LocalProcessing.Segment>();
         try (var sql = prepare("""
-                SELECT start_ms, end_ms, raw_text FROM transcript_segment WHERE transcript_id=? ORDER BY ordinal
+                SELECT start_ms, end_ms, raw_text, speaker_label, speaker_name
+                FROM transcript_segment WHERE transcript_id=? ORDER BY ordinal
                 """, version); var rows = sql.executeQuery()) {
             while (rows.next()) {
-                result.add(new LocalProcessing.Segment(rows.getLong(1), rows.getLong(2), rows.getString(3)));
+                result.add(new LocalProcessing.Segment(
+                        rows.getLong(1), rows.getLong(2), rows.getString(3), rows.getString(4), rows.getString(5)));
             }
         }
         return List.copyOf(result);
@@ -476,6 +598,32 @@ final class LectureLibrary implements AutoCloseable {
         return transaction(() -> publishTranscript(id, segments, System.currentTimeMillis()));
     }
 
+    synchronized long editTranscriptSegment(String id, long expectedVersion, int index, String text)
+            throws SQLException, IOException {
+        String edited = required(text, "Введите текст реплики.");
+        return transaction(() -> {
+            var current = documents(id);
+            if (current.transcriptId() == null || current.transcriptId() != expectedVersion
+                    || index < 0 || index >= current.segments().size()) {
+                throw new IOException("Расшифровка изменилась. Откройте лекцию заново.");
+            }
+            var segments = new ArrayList<>(current.segments());
+            var segment = segments.get(index);
+            segments.set(index, new LocalProcessing.Segment(
+                    segment.start(), segment.end(), edited, segment.speaker(), segment.speakerName()));
+            return publishTranscript(id, segments, System.currentTimeMillis());
+        });
+    }
+
+    synchronized long replaceTranscript(String id, long expectedVersion, List<LocalProcessing.Segment> segments)
+            throws SQLException, IOException {
+        return transaction(() -> {
+            if (update("UPDATE lecture SET current_transcript=current_transcript WHERE id=? AND current_transcript=?",
+                    id, expectedVersion) != 1) throw new IOException("Расшифровка изменилась. Откройте лекцию заново.");
+            return publishTranscript(id, segments, System.currentTimeMillis());
+        });
+    }
+
     private long publishTranscript(String id, List<LocalProcessing.Segment> segments, long created)
             throws SQLException, IOException {
         long version = insert("""
@@ -483,7 +631,9 @@ final class LectureLibrary implements AutoCloseable {
                 """, id, created);
         clearIndex(id, Kind.SEGMENT);
         try (var segmentRow = db.prepareStatement("""
-                     INSERT INTO transcript_segment(transcript_id, ordinal, start_ms, end_ms, raw_text) VALUES (?,?,?,?,?)
+                     INSERT INTO transcript_segment
+                         (transcript_id, ordinal, start_ms, end_ms, raw_text, speaker_label, speaker_name)
+                     VALUES (?,?,?,?,?,?,?)
                      """);
              var searchRow = db.prepareStatement("""
                      INSERT INTO search_entry(lecture_id, kind, ordinal, start_ms, excerpt, stemmed, exact)
@@ -491,7 +641,8 @@ final class LectureLibrary implements AutoCloseable {
                      """)) {
             for (int ordinal = 0; ordinal < segments.size(); ordinal++) {
                 var segment = segments.get(ordinal);
-                bind(segmentRow, version, ordinal + 1, segment.start(), segment.end(), segment.text());
+                bind(segmentRow, version, ordinal + 1, segment.start(), segment.end(),
+                        segment.text(), segment.speaker(), segment.speakerName());
                 segmentRow.executeUpdate();
                 index(searchRow, id, Kind.SEGMENT, ordinal + 1, segment.start(), segment.text());
             }

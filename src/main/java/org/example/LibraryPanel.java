@@ -14,6 +14,8 @@ import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -28,6 +30,7 @@ import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
@@ -56,6 +59,9 @@ final class LibraryPanel extends VBox {
     private final Label resultStatus = new Label();
     private final Label summary = new Label("Выберите лекцию");
     private final TextArea gaps = new TextArea();
+    private final ListView<LectureLibrary.LiveSegment> liveDraft = new ListView<>();
+    private final Button editDraftLine = new Button("Изменить реплику");
+    private final Button removeAudio = new Button("Удалить WAV");
     private final Button connect = new Button("Открыть для встречи");
     private final Button edit = new Button("Изменить карточку");
     private final Button delete = new Button("Удалить лекцию");
@@ -69,12 +75,13 @@ final class LibraryPanel extends VBox {
     private List<LectureLibrary.Subject> subjects = List.of();
     private LectureLibrary.Lecture shown;
     private long playbackVersion;
+    private long liveDraftVersion;
     private boolean applying;
     private boolean writing;
     private boolean closed;
 
     LibraryPanel(Window owner, LectureLibrary library, Consumer<LectureLibrary.Lecture> openMeeting,
-                 Predicate<String> reserved, Consumer<String> onLectureDeleted) {
+                 Predicate<String> reserved, Consumer<String> onLectureDeleted, Runnable chooseLibraryFolder) {
         super(10);
         this.owner = owner;
         this.library = library;
@@ -84,13 +91,38 @@ final class LibraryPanel extends VBox {
         player = new RecordingPlayer(this::notice);
         documents = new LectureDocuments(owner, player, library, () -> refresh(false, null));
         documents.busyProperty().addListener((obs, prior, value) -> updateButtons());
-        var playPane = new BorderPane(gaps, summary, null, player, null);
+        liveDraft.setPlaceholder(new Label("Живых реплик пока нет"));
+        liveDraft.setCellFactory(source -> new ListCell<>() {
+            {
+                setWrapText(true);
+                setOnMouseClicked(event -> {
+                    if (event.getButton() == MouseButton.PRIMARY && !isEmpty()) playDraftLine(getItem());
+                });
+            }
+
+            @Override protected void updateItem(LectureLibrary.LiveSegment segment, boolean empty) {
+                super.updateItem(segment, empty);
+                setText(empty || segment == null ? null : segment.toString());
+            }
+        });
+        liveDraft.setOnKeyPressed(event -> {
+            if (event.getCode() == KeyCode.ENTER) playDraftLine(liveDraft.getSelectionModel().getSelectedItem());
+        });
+        liveDraft.getSelectionModel().selectedItemProperty().addListener((obs, prior, value) -> updateButtons());
+        editDraftLine.setOnAction(event -> editDraftSegment());
+        removeAudio.setOnAction(event -> removeOriginalAudio());
+        var details = new VBox(8, new Label("Черновик живой расшифровки"), liveDraft,
+                new HBox(8, editDraftLine, removeAudio), gaps);
+        VBox.setVgrow(liveDraft, Priority.ALWAYS);
+        var playPane = new BorderPane(details, summary, null, player, null);
         playPane.setPadding(new Insets(10));
-        BorderPane.setMargin(gaps, new Insets(8, 0, 8, 0));
+        BorderPane.setMargin(details, new Insets(8, 0, 8, 0));
         gaps.setEditable(false);
         gaps.setWrapText(true);
         gaps.setFocusTraversable(false);
-        gaps.setPromptText("Интервалы пропусков появятся здесь");
+        gaps.setPrefRowCount(2);
+        gaps.visibleProperty().bind(gaps.textProperty().isNotEmpty());
+        gaps.managedProperty().bind(gaps.visibleProperty());
         recordingTab = new Tab("Запись", playPane);
         transcriptTab = new Tab("Расшифровка", documents.transcriptPanel());
         noteTab = new Tab("Конспект", documents.notePanel());
@@ -115,7 +147,9 @@ final class LibraryPanel extends VBox {
         until.setEditable(false);
         var reset = new Button("Сбросить фильтры");
         reset.setOnAction(event -> resetFilters());
-        var searchRow = new HBox(8, query, order, subjectsButton);
+        var libraryFolder = new Button("Папка библиотеки");
+        libraryFolder.setOnAction(event -> chooseLibraryFolder.run());
+        var searchRow = new HBox(8, query, order, subjectsButton, libraryFolder);
         var filters = new HBox(8, subject, since, until, note, state, reset);
         getChildren().addAll(searchRow, filters, split, new HBox(8, connect, edit, delete, resultStatus));
 
@@ -201,7 +235,7 @@ final class LibraryPanel extends VBox {
                     if (closed) return;
                     refresh(true, null);
                     if (!recovered) notice("Часть незавершённых записей будет восстановлена при следующем запуске.");
-                    if (!cleaned) notice("Часть файлов удалённых лекций будет очищена при следующем запуске.");
+                    if (!cleaned) notice("Часть файлов из очереди удаления будет очищена при следующем запуске.");
                 });
             } catch (Exception error) {
                 Platform.runLater(() -> {
@@ -306,18 +340,22 @@ final class LibraryPanel extends VBox {
         shown = item;
         documents.select(item, 0);
         updateButtons();
-        summary.setText(item == null ? "Выберите лекцию" : item.title() + " · " + switch (item.state()) {
+        summary.setText(item == null ? "Выберите лекцию" : item.title() + " · " + (item.audioRemoved() ? "WAV удалены" : switch (item.state()) {
             case "COMPLETE" -> "Запись готова";
             case "PARTIAL" -> "Частичная запись";
             case "EMPTY" -> "Аудио не получено";
             case "DRAFT" -> "Карточка без записи";
             default -> "Запись или восстановление";
-        });
-        if (item != null && previous != null && item.id().equals(previous.id()) && item.state().equals(previous.state())) return;
+        }));
+        if (item != null && previous != null && item.id().equals(previous.id()) && item.state().equals(previous.state())
+                && item.audioRemoved() == previous.audioRemoved()) return;
         long request = ++playbackVersion;
         player.setChunks(List.of());
         gaps.clear();
-        if (item == null || item.state().equals("DRAFT")) return;
+        if (previous == null || item == null || !previous.id().equals(item.id())) liveDraft.getItems().clear();
+        if (item != null) liveDraftChanged(item.id());
+        else liveDraftVersion++;
+        if (item == null || item.state().equals("DRAFT") || item.audioRemoved()) return;
         worker.execute(() -> {
             try {
                 var path = library.recordingsPath(item.id());
@@ -340,6 +378,59 @@ final class LibraryPanel extends VBox {
             } catch (IOException error) {
                 Platform.runLater(() -> { if (!closed && request == playbackVersion) notice("Не удалось открыть WAV."); });
             }
+        });
+    }
+
+    void liveDraftChanged(String id) {
+        if (closed || shown == null || !shown.id().equals(id)) return;
+        long request = ++liveDraftVersion;
+        worker.execute(() -> {
+            try {
+                var segments = library.liveSegments(id);
+                Platform.runLater(() -> {
+                    if (closed || request != liveDraftVersion) return;
+                    var prior = liveDraft.getSelectionModel().getSelectedItem();
+                    liveDraft.getItems().setAll(segments);
+                    if (prior != null) {
+                        for (var segment : segments) {
+                            if (segment.id() == prior.id()) {
+                                liveDraft.getSelectionModel().select(segment);
+                                break;
+                            }
+                        }
+                    }
+                });
+            } catch (Exception error) {
+                Platform.runLater(() -> {
+                    if (!closed && request == liveDraftVersion) notice("Не удалось открыть черновик расшифровки.");
+                });
+            }
+        });
+    }
+
+    private void playDraftLine(LectureLibrary.LiveSegment line) {
+        if (line != null && shown != null && shown.hasAudio()) player.seek(line.segment().start(), true);
+    }
+
+    private void editDraftSegment() {
+        var line = liveDraft.getSelectionModel().getSelectedItem();
+        if (line == null || shown == null || shown.capturing()) return;
+        String edited = DesktopDialogs.editSegment(owner, line.segment());
+        if (edited == null || edited.equals(line.segment().text())) return;
+        String id = shown.id();
+        mutate(() -> library.editLiveSegment(id, line.id(), edited), () -> liveDraftChanged(id));
+    }
+
+    private void removeOriginalAudio() {
+        var item = shown;
+        if (item == null || !item.hasAudio()) return;
+        if (!DesktopDialogs.confirm(owner, "Удаление WAV", "Удалить WAV лекции «" + item.title() + "»?\n"
+                + "Карточка, черновик, расшифровка и конспект останутся в библиотеке.")) return;
+        player.close();
+        var removed = new AtomicBoolean();
+        mutate(() -> removed.set(library.removeOriginalAudio(item.id())), () -> {
+            refresh(false, item.id());
+            if (!removed.get()) notice("Удаление WAV завершится при следующем запуске после освобождения файлов.");
         });
     }
 
@@ -458,6 +549,8 @@ final class LibraryPanel extends VBox {
         connect.setDisable(!canChange || !shown.canRecord());
         edit.setDisable(!canChange);
         delete.setDisable(!canChange || documents.busyProperty().get());
+        editDraftLine.setDisable(!canChange || liveDraft.getSelectionModel().isEmpty());
+        removeAudio.setDisable(!canChange || !shown.hasAudio() || documents.busyProperty().get());
         subjectsButton.setDisable(writing);
     }
 

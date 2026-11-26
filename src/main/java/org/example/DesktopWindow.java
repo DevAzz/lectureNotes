@@ -14,6 +14,7 @@ import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
+import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 import org.example.SaluteJazzPage.State;
 
@@ -36,6 +37,7 @@ final class DesktopWindow {
     private final Stage stage = new Stage();
     private final Path data;
     private final LectureLibrary library;
+    private final LibraryLocation location;
     private final ScheduledExecutorService workers = Executors.newSingleThreadScheduledExecutor();
     private final TextField subject = new TextField();
     private final TextField title = new TextField();
@@ -72,10 +74,12 @@ final class DesktopWindow {
     private boolean closing;
     private boolean closeStarted;
 
-    DesktopWindow(Path data, LectureLibrary library) {
+    DesktopWindow(Path data, LectureLibrary library, LibraryLocation location) {
         this.data = data;
         this.library = library;
-        libraryPanel = new LibraryPanel(stage, library, this::loadDraft, this::reserved, this::onLectureDeleted);
+        this.location = location;
+        libraryPanel = new LibraryPanel(stage, library, this::loadDraft, this::reserved, this::onLectureDeleted,
+                this::chooseLibraryFolder);
         meetingTab = new Tab("Лекция", meetingPanel());
         sections.getTabs().addAll(meetingTab, new Tab("Библиотека", libraryPanel));
         sections.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
@@ -93,6 +97,25 @@ final class DesktopWindow {
     void show() {
         stage.show();
         libraryPanel.initialize();
+    }
+
+    private void chooseLibraryFolder() {
+        if (closing) return;
+        var chooser = new DirectoryChooser();
+        chooser.setTitle("Папка библиотеки");
+        chooser.setInitialDirectory(data.toFile());
+        var selected = chooser.showDialog(stage);
+        if (selected == null) return;
+        var directory = selected.toPath();
+        workers.execute(() -> {
+            try {
+                location.save(directory);
+                Platform.runLater(() -> notice("После перезапуска откроется библиотека в папке\n" + directory
+                        + "\n\nТекущая библиотека хранится в папке\n" + data));
+            } catch (IOException error) {
+                Platform.runLater(() -> notice("Не удалось сохранить папку библиотеки."));
+            }
+        });
     }
 
     private VBox meetingPanel() {
@@ -387,21 +410,29 @@ final class DesktopWindow {
 
     private void startLiveTranscription(Process process, Path directory) {
         var whisper = libraryPanel.whisper();
+        String lectureId = activeId;
         liveText.clear();
         liveStatus.setText("Готовим первый фрагмент");
         liveWorker = Thread.startVirtualThread(() -> {
             try {
-                LiveTranscription.follow(new Recording(directory), whisper, segments -> Platform.runLater(() -> {
-                    if (capture != process || liveWorker == null) return;
-                    if (segments.isEmpty()) {
-                        if (liveText.getText().isEmpty()) liveStatus.setText("Ожидаем речь других участников");
-                        return;
+                LiveTranscription.follow(new Recording(directory), whisper, segments -> {
+                    try { library.appendLiveSegments(lectureId, segments); }
+                    catch (java.sql.SQLException error) {
+                        throw new IOException("Не удалось сохранить живые реплики.", error);
                     }
-                    liveStatus.setText("Черновик пополняется по мере записи");
-                    var text = new StringBuilder();
-                    for (var segment : segments) text.append(segment).append('\n');
-                    liveText.appendText(text.toString());
-                }));
+                    Platform.runLater(() -> {
+                        if (!segments.isEmpty()) libraryPanel.liveDraftChanged(lectureId);
+                        if (capture != process || liveWorker == null) return;
+                        if (segments.isEmpty()) {
+                            if (liveText.getText().isEmpty()) liveStatus.setText("Ожидаем речь других участников");
+                            return;
+                        }
+                        liveStatus.setText("Черновик пополняется по мере записи");
+                        var text = new StringBuilder();
+                        for (var segment : segments) text.append(segment).append('\n');
+                        liveText.appendText(text.toString());
+                    });
+                });
             } catch (InterruptedException error) {
                 Thread.currentThread().interrupt();
             } catch (IOException error) {

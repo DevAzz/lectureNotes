@@ -5,32 +5,14 @@ $project = Split-Path -Parent $PSScriptRoot
 $cache = Join-Path $project 'target/whisper-cache'
 New-Item -ItemType Directory -Path $cache,$Destination -Force | Out-Null
 
-function Get-Asset($Name, $Url, $Sha256) {
-    $file = Join-Path $cache $Name
-    if ((Test-Path -LiteralPath $file -PathType Leaf) -and
-            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -eq $Sha256) {
-        return $file
-    }
-    $download = "$file.$([guid]::NewGuid().ToString('N')).part"
-    try {
-        & curl.exe --fail --show-error --silent --location --retry 2 --connect-timeout 15 --max-time 1800 --output $download $Url
-        if ($LASTEXITCODE -ne 0) { throw "Could not download $Name (curl exit $LASTEXITCODE)." }
-        if ((Get-FileHash -LiteralPath $download -Algorithm SHA256).Hash -ne $Sha256) {
-            throw "SHA-256 mismatch for $Name."
-        }
-        Move-Item -LiteralPath $download -Destination $file -Force
-    } finally {
-        if (Test-Path -LiteralPath $download) { Remove-Item -LiteralPath $download }
-    }
-    return $file
-}
+. (Join-Path $PSScriptRoot 'build-assets.ps1')
 
 $version = 'v1.8.4'
-$cpuArchive = Get-Asset "whisper-$version-win-x64.zip" `
+$cpuArchive = Get-BuildAsset $cache "whisper-$version-win-x64.zip" `
     "https://github.com/ggml-org/whisper.cpp/releases/download/$version/whisper-bin-x64.zip" `
     '74f973345cb52ef5ba3ec9e7e7af8e48cc8c71722d1528603b80588a11f82e3e'
 $cudaName = 'whisper-cublas-12.4.0-bin-x64.zip'
-$cudaArchive = Get-Asset $cudaName `
+$cudaArchive = Get-BuildAsset $cache $cudaName `
     "https://github.com/ggml-org/whisper.cpp/releases/download/$version/$cudaName" `
     'b07cff4e59831b227896018facbb6334907bf324a342c84597c44f087823d252'
 if ($Full) {
@@ -42,13 +24,13 @@ if ($Full) {
     }
 } else {
     $model = 'ggml-large-v3-turbo-q5_0.bin'
-    $weights = Get-Asset $model "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$model" `
+    $weights = Get-BuildAsset $cache $model "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$model" `
         '394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2'
 }
-$runtimeLicense = Get-Asset "LICENSE-whisper.cpp-$version.txt" `
+$runtimeLicense = Get-BuildAsset $cache "LICENSE-whisper.cpp-$version.txt" `
     "https://raw.githubusercontent.com/ggml-org/whisper.cpp/$version/LICENSE" `
     '94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d'
-$modelLicense = Get-Asset 'LICENSE-Whisper-model.txt' `
+$modelLicense = Get-BuildAsset $cache 'LICENSE-Whisper-model.txt' `
     'https://raw.githubusercontent.com/openai/whisper/v20250625/LICENSE' `
     'b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d'
 

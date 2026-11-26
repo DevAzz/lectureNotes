@@ -4,6 +4,27 @@ import java.util.List;
 
 final class LibrarySchema {
     static final String V2 = "ALTER TABLE lecture ADD COLUMN invitation_dpapi BLOB";
+    static final List<String> V3 = List.of(
+            """
+            CREATE TABLE live_segment (
+                id INTEGER PRIMARY KEY,
+                lecture_id TEXT NOT NULL REFERENCES lecture(id) ON DELETE CASCADE,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                raw_text TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX live_segment_lecture ON live_segment(lecture_id, start_ms, id)",
+            "CREATE TABLE app_setting (name TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    );
+    static final List<String> V4 = List.of(
+            "ALTER TABLE lecture ADD COLUMN audio_removed INTEGER NOT NULL DEFAULT 0",
+            "CREATE TABLE audio_cleanup (lecture_id TEXT PRIMARY KEY REFERENCES lecture(id) ON DELETE CASCADE)"
+    );
+    static final List<String> V5 = List.of(
+            "ALTER TABLE transcript_segment ADD COLUMN speaker_label TEXT",
+            "ALTER TABLE transcript_segment ADD COLUMN speaker_name TEXT"
+    );
 
     static final List<String> V1 = List.of(
             """

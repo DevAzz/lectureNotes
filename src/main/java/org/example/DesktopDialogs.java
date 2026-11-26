@@ -6,6 +6,7 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.TextArea;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.Priority;
 import javafx.stage.Window;
@@ -34,6 +35,20 @@ final class DesktopDialogs {
         dialog.getDialogPane().setContent(content);
         dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
         return dialog.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
+    }
+
+    static String editSegment(Window owner, LocalProcessing.Segment segment) {
+        var text = new TextArea(segment.text());
+        text.setWrapText(true);
+        text.setPrefRowCount(5);
+        text.setPrefColumnCount(50);
+        if (!form(owner, "Изменить реплику · " + RecordingPlayer.timestamp(segment.start()), text)) return null;
+        String edited = text.getText().strip();
+        if (edited.isEmpty()) {
+            notice(owner, "Введите текст реплики.");
+            return null;
+        }
+        return edited;
     }
 
     static GridPane fields() {
