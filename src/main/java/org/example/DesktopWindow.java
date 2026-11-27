@@ -43,7 +43,7 @@ final class DesktopWindow {
     private final TextField topic = new TextField();
     private final TextField focus = new TextField();
     private final TextField invitation = new TextField();
-    private final Button open = new Button("Открыть ссылку");
+    private final Button open = new Button("Подключиться по ссылке");
     private final Button systemRecord = new Button("Записать звук компьютера");
     private final Button save = new Button("Сохранить карточку");
     private final Button reset = new Button("Новая карточка");
@@ -81,7 +81,7 @@ final class DesktopWindow {
         this.library = library;
         this.location = location;
         libraryPanel = new LibraryPanel(stage, library, this::loadDraft, this::reserved, this::onLectureDeleted,
-                this::chooseLibraryFolder, this::showSubjectsTab, taskBar);
+                this::showSubjectsTab, taskBar);
         subjectsPanel = new SubjectsPanel(stage, library, this::showSubjectInLibrary, this::openLectureInLibrary,
                 () -> libraryPanel.refresh(true, null));
         settingsPanel = new SettingsPanel(stage, library, data, this::chooseLibraryFolder,
@@ -152,9 +152,8 @@ final class DesktopWindow {
         libraryPanel.showSubject(subjectId);
     }
 
-    private void openLectureInLibrary(String id) {
-        sections.getSelectionModel().select(libraryTab);
-        libraryPanel.refresh(true, id);
+    private void openLectureInLibrary(LectureLibrary.Lecture item) {
+        if (libraryPanel.openSubjectLecture(item)) sections.getSelectionModel().select(libraryTab);
     }
 
     private void openTaskResult(LectureLibrary.Lecture item, DocumentTaskBar.Operation operation) {
@@ -213,6 +212,14 @@ final class DesktopWindow {
         var meter = new HBox(10, new Label("Уровень звука записи"), level);
         var cardActions = new HBox(8, systemRecord, open, save, reset);
         var captureActions = new HBox(8, start, stop, leave);
+        for (var control : java.util.List.of(start, stop, leave)) {
+            control.visibleProperty().bind(control.disableProperty().not());
+            control.managedProperty().bind(control.visibleProperty());
+        }
+        start.getStyleClass().add("primary-action");
+        stop.getStyleClass().add("primary-action");
+        captureActions.visibleProperty().bind(start.visibleProperty().or(stop.visibleProperty()).or(leave.visibleProperty()));
+        captureActions.managedProperty().bind(captureActions.visibleProperty());
         liveText.setEditable(false);
         liveText.setWrapText(true);
         liveText.setPrefRowCount(5);

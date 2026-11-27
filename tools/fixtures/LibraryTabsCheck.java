@@ -77,7 +77,8 @@ public final class LibraryTabsCheck {
     private static void taskBarChecks(Path work) throws Exception {
         var library = new LectureLibrary(work);
         var lecture = library.lecture(library.createLecture("История", "Реформы", "", ""));
-        library.saveNote(lecture.id(), null, "Проверка перехода", false);
+        String markdown = "Первый абзац.\n\n".repeat(90) + "Говорим о **производной** функции.";
+        library.saveNote(lecture.id(), null, markdown, false);
         var window = new AtomicReference<Stage>();
         fx(() -> {
             new DesktopWindow(work, library, new LibraryLocation(work)).show();
@@ -103,8 +104,35 @@ public final class LibraryTabsCheck {
         });
         awaitTrue(() -> {
             var source = (TextArea) window.get().getScene().lookup(".note-source");
-            return source != null && source.getText().equals("Проверка перехода");
+            return source != null && source.getText().equals(markdown);
         }, "opened the document for the task's lecture");
+        fx(() -> {
+            var root = window.get().getScene().getRoot();
+            var query = root.lookupAll(".text-field").stream().filter(TextField.class::isInstance)
+                    .map(TextField.class::cast).filter(field -> field.getPromptText() != null
+                            && field.getPromptText().startsWith("Поиск по лекциям")).findFirst().orElseThrow();
+            query.setText("производная");
+        });
+        awaitTrue(() -> window.get().getScene().getRoot().lookupAll(".list-cell").stream()
+                .filter(javafx.scene.control.ListCell.class::isInstance).map(javafx.scene.control.ListCell.class::cast)
+                .anyMatch(cell -> cell.getItem() instanceof LectureLibrary.Hit hit
+                        && hit.kind() == LectureLibrary.Kind.NOTE && hit.excerpt().contains("производной")),
+                "snippet follows the Russian word form deep inside the note");
+        fx(() -> {
+            var cell = window.get().getScene().getRoot().lookupAll(".list-cell").stream()
+                    .filter(javafx.scene.control.ListCell.class::isInstance).map(javafx.scene.control.ListCell.class::cast)
+                    .filter(c -> c.getItem() instanceof LectureLibrary.Hit hit && hit.kind() == LectureLibrary.Kind.NOTE)
+                    .findFirst().orElseThrow();
+            cell.getListView().getSelectionModel().select(cell.getIndex());
+            cell.fireEvent(new javafx.scene.input.MouseEvent(javafx.scene.input.MouseEvent.MOUSE_CLICKED,
+                    0, 0, 0, 0, javafx.scene.input.MouseButton.PRIMARY, 2,
+                    false, false, false, false, false, false, false, false, false, true, null));
+        });
+        awaitTrue(() -> {
+            var preview = (MarkdownView) window.get().getScene().lookup(".md-view");
+            return preview.lookup(".search-highlight") != null && preview.getVvalue() > 0.5;
+        }, "double click scrolls to and highlights the match");
+        awaitTrue(() -> window.get().getScene().lookup(".search-highlight") == null, "highlight expires");
         fx(() -> window.get().fireEvent(new javafx.stage.WindowEvent(window.get(),
                 javafx.stage.WindowEvent.WINDOW_CLOSE_REQUEST)));
         awaitTrue(() -> !window.get().isShowing(), "task window closed");
@@ -144,10 +172,10 @@ public final class LibraryTabsCheck {
         require(subjects.getItems().stream().anyMatch(item -> item.name().equals("Математический анализ")
                         && item.lectures() == 2 && item.notes() == 0),
                 "the subject card counts its lectures: " + subjects.getItems());
-        require(button("Создать предмет") != null && button("Перенести все лекции") != null
-                && button("Удалить") != null && button("Показать лекции в библиотеке") != null
-                && button("Перенести выбранную лекцию") != null, "subject actions are present");
-        require(!button("Изменить").isDisabled(), "the selected subject can be edited");
+        require(button("Создать предмет") != null && subjectAction("Перенести все лекции") != null
+                && subjectAction("Удалить") != null && button("В библиотеку") != null
+                && subjectAction("Перенести выбранную лекцию") != null, "subject actions are present");
+        require(!subjectAction("Изменить").isDisable(), "the selected subject can be edited");
 
         fx(() -> field("#subject-search").setText("истори"));
         var filtered = awaitSubjects(1, "an inaccurate word form finds one subject");
@@ -175,7 +203,7 @@ public final class LibraryTabsCheck {
         require(lectures.getItems().stream().allMatch(item -> item.subject().equals("Математический анализ")),
                 "the lecture list belongs to the subject: " + lectures.getItems());
         fx(() -> lectures.getSelectionModel().select(0));
-        awaitTrue(() -> !button("Перенести выбранную лекцию").isDisabled()
+        awaitTrue(() -> !subjectAction("Перенести выбранную лекцию").isDisable()
                 && !button("Открыть лекцию").isDisabled(), "a selected lecture can be moved or opened");
         require(labels(subjectsPanel).contains("Курс лекций первого семестра"), "the subject description is shown");
         require(labels(subjectsPanel).contains("2 лекц."), "the details line counts the lectures");
@@ -296,6 +324,12 @@ public final class LibraryTabsCheck {
             Thread.sleep(100);
         }
         throw new AssertionError(name);
+    }
+
+    private static javafx.scene.control.MenuItem subjectAction(String title) {
+        return subjectsPanel.lookupAll(".menu-button").stream().map(javafx.scene.control.MenuButton.class::cast)
+                .flatMap(menu -> menu.getItems().stream()).filter(item -> item.getText().equals(title))
+                .findFirst().orElseThrow();
     }
 
     private static Button button(String label) {

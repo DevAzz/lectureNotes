@@ -191,6 +191,19 @@ public final class ProcessingCheck {
                         try { Thread.sleep(650); }
                         catch (InterruptedException error) { Thread.currentThread().interrupt(); }
                         payload = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"Черновик.\"}}]}";
+                    } else if (prompt.contains("\"model\":\"citations\"")) {
+                        String answer;
+                        if (prompt.contains("Объедини эти черновики")) {
+                            answer = "Первое объяснение [[S1]], второе [[S2]], лишняя ссылка [[S3]].";
+                        } else if (prompt.contains("S1 Начало")) {
+                            check(prompt.contains("Копируй идентификатор"), "First draft gets citation rules");
+                            answer = "Первое объяснение [[S1]]. Чужая реплика [[S3]].";
+                        } else {
+                            check(prompt.contains("Копируй идентификатор"), "Last draft gets citation rules");
+                            answer = "Второе объяснение [[ s2 ]], время [выдумано](#t=99999).";
+                        }
+                        payload = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":"
+                                + Json.quote(answer) + "}}]}";
                     } else payload = """
                             {"choices":[{"finish_reason":"stop","message":{
                             "reasoning_content":"draft", "content":"Производная показывает скорость изменения. [[S1]] [[S999]]"}}]}
@@ -219,9 +232,18 @@ public final class ProcessingCheck {
                         "", LocalProcessing.DEFAULT_SYSTEM_PROMPT, Duration.ofSeconds(10));
                 library.saveNote(lectureId, transcriptId, generated, true);
                 check(generated.contains("[00:01:01](#t=61500)"), "Timestamp rendered from segment");
-                check(generated.contains("[[S999]]"), "Unknown reference left as text");
+                check(!generated.contains("[[S999]]"), "Unknown reference removed");
                 check(library.documents(lectureId).note().markdown().equals(generated), "Current note");
                 check(library.noteVersions(lectureId).size() == 2, "Manual edition preserved");
+                var longLecture = List.of(new LocalProcessing.Segment(12_000, 13_000, "Начало " + "а".repeat(8_000)),
+                        new LocalProcessing.Segment(54_000, 55_000, "Второе объяснение"),
+                        new LocalProcessing.Segment(80_000, 81_000, "Третья реплика"));
+                String withCitations = LocalProcessing.generate("Тема", longLecture,
+                        new LocalProcessing.Llm(api.toString(), "citations", "", 0, 900, false), "", customPrompt,
+                        Duration.ofSeconds(10));
+                check(withCitations.contains("[00:00:12](#t=12000)") && withCitations.contains("[00:00:54](#t=54000)")
+                                && !withCitations.contains("#t=80000") && !withCitations.contains("#t=99999"),
+                        "Synthesis preserves citations accepted in the corresponding drafts");
                 String free = LocalProcessing.generate("Скорость изменения", segments,
                         new LocalProcessing.Llm(api.toString(), "plain-note", "", 0, 900, false), "", customPrompt,
                         Duration.ofSeconds(10));

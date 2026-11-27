@@ -10,6 +10,7 @@ import javafx.scene.Node;
 import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.Separator;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextArea;
@@ -82,7 +83,33 @@ final class MarkdownEditor extends BorderPane {
     private final BooleanBinding toolsDisabled;
     private Runnable saveAction = () -> { };
     private Mode mode = Mode.SPLIT;
+    private final PauseTransition flash = new PauseTransition(Duration.seconds(2));
     private boolean dirty;
+    private boolean synchronizingScroll;
+
+    boolean revealMatch(RussianSearch.Match match) {
+        String text = editor.getText();
+        int start = match.start();
+        if (!text.startsWith(match.text(), start)) start = text.indexOf(match.text());
+        if (start < 0) return false;
+        if (mode != Mode.EDIT && text.indexOf(match.text()) == text.lastIndexOf(match.text())) {
+            debounce.stop();
+            refreshPreview();
+            if (preview.reveal(match.text())) return true;
+        }
+        if (mode == Mode.PREVIEW) ((ToggleButton) lookup("#md-view-split")).fire();
+        editor.applyCss();
+        layout();
+        flash.stop();
+        editor.requestFocus();
+        editor.selectRange(start, start + match.text().length());
+        var selection = editor.getSelection();
+        flash.setOnFinished(event -> {
+            if (editor.getSelection().equals(selection) && editor.getText().equals(text)) editor.deselect();
+        });
+        flash.playFromStart();
+        return true;
+    }
 
     MarkdownEditor(TextArea editor, LongSupplier playback) {
         this.editor = editor;
@@ -115,7 +142,9 @@ final class MarkdownEditor extends BorderPane {
         undoTool = iconButton("undo", EditorIcons.undo(), "Отменить", "Отменить (Ctrl+Z)", this::undo);
         redoTool = iconButton("redo", EditorIcons.redo(), "Повторить", "Повторить (Ctrl+Y)", this::redo);
 
-        debounce.setOnFinished(event -> preview.setMarkdown(editor.getText()));
+        editor.scrollTopProperty().addListener((obs, old, value) -> synchronizeScroll(true));
+        preview.vvalueProperty().addListener((obs, old, value) -> synchronizeScroll(false));
+        debounce.setOnFinished(event -> refreshPreview());
         setTop(toolbar());
         setCenter(split);
         setBottom(footer());
@@ -261,7 +290,21 @@ final class MarkdownEditor extends BorderPane {
             case SPLIT -> List.of(editor, preview);
             case PREVIEW -> List.of(preview);
         });
-        if (value != Mode.EDIT) preview.setMarkdown(editor.getText());
+        if (value != Mode.EDIT) refreshPreview();
+    }
+
+    private void synchronizeScroll(boolean fromEditor) {
+        if (mode != Mode.SPLIT || synchronizingScroll) return;
+        if (!(editor.lookup(".scroll-pane") instanceof ScrollPane source) || source.getContent() == null) return;
+        double editorRange = source.getContent().getLayoutBounds().getHeight() - source.getViewportBounds().getHeight();
+        if (editorRange <= 0 || preview.scrollableHeight() <= 0) return;
+        synchronizingScroll = true;
+        try {
+            if (fromEditor) preview.setVvalue(Math.clamp(editor.getScrollTop() / editorRange, 0, 1));
+            else editor.setScrollTop(preview.getVvalue() * editorRange);
+        } finally {
+            synchronizingScroll = false;
+        }
     }
 
     private void schedulePreview() {
@@ -528,6 +571,17 @@ final class MarkdownEditor extends BorderPane {
     }
 
     void refreshPreview() {
-        preview.setMarkdown(editor.getText());
+        synchronizingScroll = true;
+        try {
+            preview.setMarkdown(editor.getText());
+        } finally {
+            synchronizingScroll = false;
+        }
+        if (mode == Mode.SPLIT) {
+            javafx.application.Platform.runLater(() -> {
+                if (preview.isNeedsLayout() && preview.getScene() != null) preview.layout();
+                synchronizeScroll(true);
+            });
+        }
     }
 }

@@ -209,3 +209,13 @@
 .md-marker { -fx-min-width: 24; }
 .md-bullet, .md-number, .md-task { -fx-fill: #2f6feb; -fx-font-weight: 700; }
 .md-task-done { -fx-fill: #0f6b56; }
+
+.settings-card .label, .settings-card .check-box { -fx-text-fill: -ink; }
+.subject-pane { -fx-padding: 12; -fx-background-color: white; }
+.subject-pane .list-cell:empty { -fx-background-color: white; }
+.subject-pane .list-cell:filled { -fx-padding: 8; }
+.subject-title { -fx-font-size: 19px; -fx-font-weight: bold; -fx-text-fill: -ink; }
+.subject-meta, .settings-card .subject-meta { -fx-font-size: 12px; -fx-text-fill: -ink-soft; }
+.button.primary-action { -fx-background-color: #2057a5; -fx-text-fill: white; }
+.search-highlight { -fx-fill: rgba(255, 183, 34, 0.48); -fx-stroke: transparent; }
+.md-selection { -fx-fill: #c8defa; -fx-stroke: transparent; }

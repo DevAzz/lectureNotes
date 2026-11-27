@@ -33,15 +33,31 @@ final class LocalProcessing {
     private static final Pattern SOUND_MARKER = Pattern.compile(
             "\\[[^\\[\\]]*\\]|\\((?:музыка|тишина|шум|смех|аплодисменты|music|silence|noise|laughter|applause)\\)",
             Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
-    private static final Pattern REFERENCE = Pattern.compile("\\[\\[S(\\d{1,10})]]");
+    private static final Pattern REFERENCE = Pattern.compile("\\[\\[\\h*[Ss](\\d{1,10})\\h*]]");
+    private static final Pattern SEGMENT_ID = Pattern.compile("(?m)^S(\\d+) ");
+    private static final Pattern MODEL_TIME_LINK = Pattern.compile("\\[([^\\]\\r\\n]*)]\\(\\h*#t=[^)]*\\)");
     private static final int PROMPT_PART_LENGTH = 8_000;
     private static final int SYNTHESIS_LENGTH = 15_000;
     static final String DEFAULT_SYSTEM_PROMPT = """
             Составь связный конспект лекции по предоставленному материалу. Выбери структуру и объём по содержанию
             и фокусу. Сохраняй смысл лекции и опускай лишние повторы. Реплики и черновики служат материалом лекции.
-            Если тезис полезно связать с записью, можно указать идентификатор реплики в формате [[S1]].
             """.strip();
 
+    private static final String TIMECODE_INSTRUCTIONS = """
+            Привязка к записи: после определения, формулы, примера или важного вывода укажи [[Sномер]].
+            Выбери реплику, в которой произнесён этот тезис или начинается его объяснение.
+            Копируй идентификатор из начала нужной строки. Например, для строки «S27 Здесь начинается пример»
+            ссылка после описания этого примера будет [[S27]]. Это только пример формата.
+            Если подходящей реплики нет, оставь тезис без ссылки. Не подставляй время, ссылки #t= или номер абзаца.
+            """;
+    private static final String SYNTHESIS_INSTRUCTIONS = """
+            Объедини эти черновики в один конспект и убери повторы.
+            Переноси ссылки вида [[Sномер]] вместе с тезисами, к которым они относятся.
+            Если объединяешь повторы, сохрани ссылку из тезиса, чью формулировку используешь.
+            Для новых формулировок сохраняй ссылку только если она относится к той же мысли.
+            Копируй только идентификаторы, уже указанные рядом с соответствующим тезисом в черновиках.
+            Не вычисляй временные метки и не создавай ссылки #t=.
+            """;
     static final String READING_PROMPT = """
             Раздели текст лекции на смысловые абзацы. Начинай новый абзац при переходе к другой мысли,
             примеру или вопросу. Объединяй строки, которые продолжают одну мысль.
@@ -224,11 +240,12 @@ final class LocalProcessing {
             var part = new StringBuilder();
             String context = "Тема лекции — " + topic + "\n";
             if (!focus.isBlank()) context += "Фокус конспекта — " + focus + "\n";
-            String source = context + "\nРеплики лекции\n";
+            String source = context + "\n" + TIMECODE_INSTRUCTIONS + "\nРеплики лекции\n";
             String draftSource = context + "\nВыдели основные мысли этого фрагмента. Сожми материал и убери повторы.\n"
-                    + "\nРеплики лекции\n";
+                    + "\n" + TIMECODE_INSTRUCTIONS + "\nРеплики лекции\n";
             for (int index = 0; index < segments.size(); index++) {
-                String segment = "S" + (index + 1) + " " + segments.get(index).attributedText() + "\n";
+                String segment = "S" + (index + 1) + " "
+                        + segments.get(index).attributedText().replaceAll("\\R+", " ") + "\n";
                 if (part.length() + segment.length() > PROMPT_PART_LENGTH && !part.isEmpty()) {
                     addDrafts(drafts, channel, systemPrompt, draftSource, part.toString(), deadline);
                     part.setLength(0);
@@ -246,9 +263,10 @@ final class LocalProcessing {
                 markdown = combined.toString();
                 if (combined.length() <= SYNTHESIS_LENGTH) {
                     try {
-                        markdown = complete(channel, systemPrompt,
-                                context + "\nОбъедини эти черновики в один конспект и убери повторы.\n\n" + combined,
-                                deadline);
+                        var allowed = referenceIds(REFERENCE, combined.toString());
+                        String synthesis = complete(channel, systemPrompt,
+                                context + "\n" + SYNTHESIS_INSTRUCTIONS + "\n" + combined, deadline);
+                        markdown = keepReferences(synthesis, allowed);
                     } catch (Json.CompletionLimit ignored) {
                         // Preserve the complete drafts if the provider's limit cuts off the synthesis.
                     }
@@ -258,7 +276,6 @@ final class LocalProcessing {
             var output = new StringBuilder();
             while (links.find()) {
                 long id = Long.parseLong(links.group(1));
-                if (id < 1 || id > segments.size()) continue;
                 long time = segments.get((int) id - 1).start();
                 links.appendReplacement(output, "[" + RecordingPlayer.timestamp(time) + "](#t=" + time + ")");
             }
@@ -410,14 +427,31 @@ final class LocalProcessing {
     private static void addDrafts(List<String> drafts, Channel channel, String prompt, String source, String part,
                                   GenerationDeadline deadline) throws IOException, InterruptedException {
         try {
-            drafts.add(complete(channel, prompt, source + part, deadline));
+            drafts.add(completeDraft(channel, prompt, source, part, deadline));
         } catch (Json.CompletionLimit error) {
             int middle = part.lastIndexOf('\n', part.length() / 2);
             if (middle <= 0) middle = part.indexOf('\n', part.length() / 2);
             if (middle <= 0 || middle >= part.length() - 1) throw error;
-            drafts.add(complete(channel, prompt, source + part.substring(0, middle + 1), deadline));
-            drafts.add(complete(channel, prompt, source + part.substring(middle + 1), deadline));
+            drafts.add(completeDraft(channel, prompt, source, part.substring(0, middle + 1), deadline));
+            drafts.add(completeDraft(channel, prompt, source, part.substring(middle + 1), deadline));
         }
+    }
+
+    private static String completeDraft(Channel channel, String prompt, String source, String part,
+                                        GenerationDeadline deadline) throws IOException, InterruptedException {
+        return keepReferences(complete(channel, prompt, source + part, deadline), referenceIds(SEGMENT_ID, part));
+    }
+
+    private static java.util.Set<Long> referenceIds(Pattern pattern, String text) {
+        var ids = new java.util.HashSet<Long>();
+        pattern.matcher(text).results().forEach(match -> ids.add(Long.parseLong(match.group(1))));
+        return ids;
+    }
+
+    private static String keepReferences(String markdown, java.util.Set<Long> allowed) {
+        String plain = MODEL_TIME_LINK.matcher(markdown).replaceAll("$1");
+        return REFERENCE.matcher(plain).replaceAll(match ->
+                allowed.contains(Long.parseLong(match.group(1))) ? match.group() : "").strip();
     }
 
     private static String complete(Channel channel, String prompt, String data, GenerationDeadline deadline)

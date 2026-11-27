@@ -55,7 +55,7 @@ Playwright открывает указанную HTTP- или HTTPS-ссылку
 
 | Компонент | Реализация |
 |---|---|
-| `desktop` | JDK 25, OpenJFX 21, Maven. Экраны «Новая лекция», «Профили моделей», «Библиотека», карточка с вкладками «Запись», «Расшифровка», «Конспект», «Текст для чтения». Операции браузера, диска, БД и моделей выполняются вне потока JavaFX. Поставка — Windows x64 `jpackage app-image` с Java runtime. |
+| `desktop` | JDK 25, OpenJFX 21, Maven. Экраны «Новая лекция», «Профили моделей», «Библиотека», карточка с вкладками «Запись», «Расшифровка», «Конспект», «Текст». Операции браузера, диска, БД и моделей выполняются вне потока JavaFX. Поставка — Windows x64 `jpackage app-image` с Java runtime. |
 | `application` | `MeetingCoordinator` ведёт сессию ВКС и захват. `JobCoordinator` ведёт сохраняемую очередь. Порты `MeetingAdapter`, `AudioCapture`, `SpeechToText`, `SpeakerDiarization`, `NoteModel`, `LectureRepository` позволяют менять реализацию компонентов. |
 | `audio-capture.exe` | C++17 и Windows SDK. WASAPI process loopback. Управляющие команды через stdin, события и ошибки в JSON Lines через stdout, PCM — непосредственно в каталог сессии. EOF управляющего канала останавливает helper. |
 | `speech` | `whisper.cpp` с мультиязычной `large-v3`, язык `ru`, CUDA при наличии. Для локальной диаризации — CPU-сборка `sherpa-onnx`. Стартовый кандидат — `pyannote/segmentation-3.0` и `3D-Speaker ERes2Net` из документированной связки. До выпуска измерить качество на русском материале и утвердить конкретные веса и их лицензии. |

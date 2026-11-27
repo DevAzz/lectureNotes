@@ -1,4 +1,6 @@
 package org.example;
+import javafx.scene.layout.FlowPane;
+import javafx.scene.control.ToggleButton;
 
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
@@ -89,7 +91,7 @@ final class LibraryPanel extends VBox {
     private boolean closed;
 
     LibraryPanel(Window owner, LectureLibrary library, Consumer<LectureLibrary.Lecture> openMeeting,
-                 Predicate<String> reserved, Consumer<String> onLectureDeleted, Runnable chooseLibraryFolder,
+                 Predicate<String> reserved, Consumer<String> onLectureDeleted,
                  Runnable openSubjects, DocumentTaskBar taskBar) {
         super(10);
         this.owner = owner;
@@ -136,7 +138,7 @@ final class LibraryPanel extends VBox {
         recordingTab = new Tab("Запись", recordingPane);
         transcriptTab = new Tab("Расшифровка", documents.transcriptPanel());
         noteTab = new Tab("Конспект", documents.notePanel());
-        readingTab = new Tab("Текст для чтения", documents.readingPanel());
+        readingTab = new Tab("Текст", documents.readingPanel());
         tabs.getTabs().addAll(recordingTab, transcriptTab, noteTab, readingTab);
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
         var lecturePane = new BorderPane(tabs);
@@ -165,14 +167,30 @@ final class LibraryPanel extends VBox {
         reset.disableProperty().bind(Bindings.createBooleanBinding(this::filtersEmpty,
                 query.textProperty(), subject.valueProperty(), since.valueProperty(), until.valueProperty(),
                 note.valueProperty(), state.valueProperty()));
-        var libraryFolder = new Button("Папка библиотеки");
-        libraryFolder.setOnAction(event -> chooseLibraryFolder.run());
-        var searchRow = new HBox(8, query, order, subjectsButton, libraryFolder);
-        var filters = new HBox(8, subject, since, until, note, state, reset);
+        var more = new ToggleButton("Фильтры");
+        more.textProperty().bind(Bindings.createStringBinding(() -> {
+            int count = (since.getValue() == null ? 0 : 1) + (until.getValue() == null ? 0 : 1)
+                    + (value(note) == null ? 0 : 1) + (value(state) == null ? 0 : 1);
+            return count == 0 ? "Фильтры" : "Фильтры · " + count;
+        }, since.valueProperty(), until.valueProperty(), note.valueProperty(), state.valueProperty()));
+        var searchRow = new HBox(8, query, subject, more, order, subjectsButton);
+        subject.setMaxWidth(210);
+        var filters = new FlowPane(8, 6, since, until, note, state, reset);
+        filters.visibleProperty().bind(more.selectedProperty());
+        filters.managedProperty().bind(filters.visibleProperty());
         getChildren().addAll(searchRow, filters, split, new HBox(8, connect, edit, delete, resultStatus));
 
         results.setPlaceholder(new Label("Лекции не найдены"));
+        results.setOnKeyPressed(event -> {
+            if (event.getCode() == KeyCode.ENTER) revealResult(results.getSelectionModel().getSelectedItem());
+        });
         results.setCellFactory(source -> new ListCell<>() {
+            {
+                setOnMouseClicked(event -> {
+                    if (event.getButton() == MouseButton.PRIMARY && event.getClickCount() == 2 && !isEmpty())
+                        revealResult(getItem());
+                });
+            }
             @Override protected void updateItem(LectureLibrary.Hit hit, boolean empty) {
                 super.updateItem(hit, empty);
                 setText(empty || hit == null ? null : resultLabel(hit));
@@ -201,6 +219,14 @@ final class LibraryPanel extends VBox {
         updateButtons();
     }
 
+    private void revealResult(LectureLibrary.Hit hit) {
+        if (hit == null || shown == null || !shown.id().equals(hit.lecture().id())) return;
+        if (hit.kind() == LectureLibrary.Kind.NOTE && hit.match() != null) {
+            tabs.getSelectionModel().select(noteTab);
+            documents.revealMatch(hit.match());
+        }
+    }
+
     private void configureFilters() {
         subject.getItems().add(new Choice<>("Все предметы", null));
         note.getItems().setAll(List.of(new Choice<>("Любой конспект", null), new Choice<>("Есть конспект", true),
@@ -221,6 +247,11 @@ final class LibraryPanel extends VBox {
     }
 
     private void resetFilters() {
+        clearFilterValues();
+        refresh(false, null);
+    }
+
+    private void clearFilterValues() {
         applying = true;
         query.clear();
         subject.getSelectionModel().selectFirst();
@@ -229,7 +260,6 @@ final class LibraryPanel extends VBox {
         since.setValue(null);
         until.setValue(null);
         applying = false;
-        refresh(false, null);
     }
 
     /** Кнопка сброса нужна только когда задан поиск или хотя бы один фильтр. */
@@ -315,6 +345,14 @@ final class LibraryPanel extends VBox {
     }
 
     /** Переключает библиотеку на лекции выбранного предмета. */
+    boolean openSubjectLecture(LectureLibrary.Lecture item) {
+        if (shown != null && !shown.id().equals(item.id()) && !documents.canLeaveSelection()) return false;
+        clearFilterValues();
+        show(item, LectureLibrary.Kind.CARD, 0);
+        refresh(true, item.id());
+        return true;
+    }
+
     void showSubject(long subjectId) {
         var choice = subject.getItems().stream()
                 .filter(item -> item.value() != null && item.value() == subjectId)

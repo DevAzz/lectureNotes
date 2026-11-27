@@ -126,9 +126,34 @@ public final class MarkdownUiCheck {
             require(label.getText().contains("00:01:01"), "timecode label: " + label.getText());
             require(label.getOnMouseClicked() != null, "timecode handler");
             label.getOnMouseClicked().handle(null);
+
+            view.setMarkdown("Начало **жирного текста**.\n\nДругая строка.");
+            view.applyCss();
+            view.layout();
+            var paragraphs = view.lookupAll(".md-para").stream().map(javafx.scene.text.TextFlow.class::cast).toList();
+            var first = paragraphs.getFirst();
+            var last = paragraphs.getLast();
+            drag(view, first.localToScene(1, 8), last.localToScene(last.getWidth() - 1, 8));
+            require(view.selectedText().equals("Начало жирного текста.\nДругая строка."),
+                    "drag selects formatted text across paragraphs: " + view.selectedText());
+            view.fireEvent(new javafx.scene.input.KeyEvent(javafx.scene.input.KeyEvent.KEY_PRESSED,
+                    "", "", javafx.scene.input.KeyCode.C, false, true, false, false));
+            require(view.selectedText().equals(javafx.scene.input.Clipboard.getSystemClipboard().getString()),
+                    "Ctrl+C copies visible text");
             stage.close();
         });
         require(seeked.get() == 61_500, "timecode seek value: " + seeked.get());
+    }
+
+    private static void drag(MarkdownView view, javafx.geometry.Point2D start, javafx.geometry.Point2D end) {
+        Node body = view.getContent();
+        for (var type : List.of(javafx.scene.input.MouseEvent.MOUSE_PRESSED,
+                javafx.scene.input.MouseEvent.MOUSE_DRAGGED, javafx.scene.input.MouseEvent.MOUSE_RELEASED)) {
+            var point = type == javafx.scene.input.MouseEvent.MOUSE_PRESSED ? start : end;
+            body.fireEvent(new javafx.scene.input.MouseEvent(type, point.getX(), point.getY(), 0, 0,
+                    javafx.scene.input.MouseButton.PRIMARY, 1, false, false, false, false,
+                    type != javafx.scene.input.MouseEvent.MOUSE_RELEASED, false, false, false, false, false, null));
+        }
     }
 
     private static String stylesheet() {
@@ -232,6 +257,15 @@ public final class MarkdownUiCheck {
             mode(editor, "md-view-split").fire();
             require(split.getItems().size() == 2, "split mode");
             require(!tool(editor, "md-bold").isDisabled(), "editing tools return with the source field");
+            area.setText(SAMPLE.repeat(26));
+            editor.refreshPreview();
+            editor.applyCss();
+            editor.layout();
+            var preview = editor.preview();
+            preview.setVvalue(0.65);
+            require(area.getScrollTop() > 500, "scrolling the preview moves the source");
+            area.setScrollTop(0);
+            require(preview.getVvalue() == 0, "scrolling the source moves the preview");
             mode(editor, "md-view-edit").fire();
             require(split.getItems().size() == 1 && split.getItems().getFirst() == area, "edit mode");
             stage.close();

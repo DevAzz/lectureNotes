@@ -53,7 +53,7 @@ final class LectureLibrary implements AutoCloseable {
     enum Kind { CARD, SEGMENT, NOTE }
     enum Sort { DATE, TITLE, RELEVANCE }
     record Filters(Long subjectId, Instant since, Instant before, Boolean hasNote, String state, Sort sort) { }
-    record Hit(Lecture lecture, Kind kind, int ordinal, long startMillis, String excerpt) { }
+    record Hit(Lecture lecture, Kind kind, int ordinal, long startMillis, String excerpt, RussianSearch.Match match) { }
     record Documents(Long transcriptId, List<LocalProcessing.Segment> segments, Note note, String readingText) { }
     record LiveSegment(long id, LocalProcessing.Segment segment) {
         @Override public String toString() { return segment.toString(); }
@@ -514,7 +514,7 @@ final class LectureLibrary implements AutoCloseable {
         var sql = new StringBuilder("SELECT ").append(LECTURE_COLUMNS);
         if (matching) {
             sql.append("""
-                    , e.kind, e.ordinal, e.start_ms, substr(replace(e.excerpt, char(10), ' '), 1, 180)
+                    , e.kind, e.ordinal, e.start_ms, e.excerpt
                     FROM search_fts JOIN search_entry e ON e.id=search_fts.rowid
                     JOIN lecture l ON l.id=e.lecture_id JOIN subject s ON s.id=l.subject_id
                     WHERE search_fts MATCH ?
@@ -545,9 +545,15 @@ final class LectureLibrary implements AutoCloseable {
         try (var statement = prepare(sql.toString(), args.toArray()); var rows = statement.executeQuery()) {
             while (rows.next()) {
                 Lecture lecture = readLecture(rows);
+                String content = matching ? rows.getString(14).replace("\r\n", "\n").replace("\r", "") : "";
+                var match = matching ? search.locate(content, input) : null;
+                int from = match == null ? 0 : Math.max(0, match.start() - 48);
+                int to = Math.min(content.length(), from + 180);
+                String excerpt = (from > 0 ? "…" : "") + content.substring(from, to).replace('\n', ' ')
+                        + (to < content.length() ? "…" : "");
                 result.add(new Hit(lecture, matching ? Kind.valueOf(rows.getString(11)) : Kind.CARD,
                         matching ? rows.getInt(12) : 0, matching ? rows.getLong(13) : 0,
-                        matching ? rows.getString(14) : ""));
+                        excerpt, match));
             }
         }
         return result;

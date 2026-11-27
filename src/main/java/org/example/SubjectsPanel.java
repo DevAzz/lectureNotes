@@ -1,4 +1,8 @@
 package org.example;
+import javafx.scene.input.MouseButton;
+import javafx.scene.input.KeyCode;
+import javafx.scene.control.MenuButton;
+import javafx.scene.control.MenuItem;
 
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -46,7 +50,7 @@ final class SubjectsPanel extends VBox {
     private final Window owner;
     private final LectureLibrary library;
     private final Consumer<Long> openSubjectInLibrary;
-    private final Consumer<String> openLectureInLibrary;
+    private final Consumer<LectureLibrary.Lecture> openLectureInLibrary;
     private final Runnable libraryChanged;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
 
@@ -54,14 +58,16 @@ final class SubjectsPanel extends VBox {
     private final ComboBox<Order> order = new ComboBox<>();
     private final ListView<LectureLibrary.Subject> subjects = new ListView<>();
     private final ListView<LectureLibrary.Lecture> lectures = new ListView<>();
+    private final Label heading = new Label();
+    private final Label statistics = new Label();
     private final Label details = new Label();
     private final Label status = new Label();
     private final Button create = new Button("Создать предмет");
-    private final Button edit = new Button("Изменить");
-    private final Button remove = new Button("Удалить");
-    private final Button moveAll = new Button("Перенести все лекции");
-    private final Button moveOne = new Button("Перенести выбранную лекцию");
-    private final Button openSubject = new Button("Показать лекции в библиотеке");
+    private final MenuItem edit = new MenuItem("Изменить");
+    private final MenuItem remove = new MenuItem("Удалить");
+    private final MenuItem moveAll = new MenuItem("Перенести все лекции");
+    private final MenuItem moveOne = new MenuItem("Перенести выбранную лекцию");
+    private final Button openSubject = new Button("В библиотеку");
     private final Button openLecture = new Button("Открыть лекцию");
 
     private List<LectureLibrary.Subject> all = List.of();
@@ -71,7 +77,7 @@ final class SubjectsPanel extends VBox {
     private boolean closed;
 
     SubjectsPanel(Window owner, LectureLibrary library, Consumer<Long> openSubjectInLibrary,
-                  Consumer<String> openLectureInLibrary, Runnable libraryChanged) {
+                  Consumer<LectureLibrary.Lecture> openLectureInLibrary, Runnable libraryChanged) {
         super(10);
         this.owner = owner;
         this.library = library;
@@ -109,18 +115,28 @@ final class SubjectsPanel extends VBox {
         lectures.setId("subject-lectures");
         lectures.setPlaceholder(new Label("В этом предмете ещё нет лекций"));
         lectures.setCellFactory(source -> new ListCell<>() {
-            { setWrapText(true); }
+            {
+                setWrapText(true);
+                setOnMouseClicked(event -> {
+                    if (!isEmpty() && event.getButton() == MouseButton.PRIMARY
+                            && event.getClickCount() == 2) openLecture.fire();
+                });
+            }
 
             @Override protected void updateItem(LectureLibrary.Lecture item, boolean empty) {
                 super.updateItem(item, empty);
-                setText(empty || item == null ? null
-                        : item.title() + "\n" + LIST_DATE.format(item.created()) + " · " + state(item));
+                if (empty || item == null) { setGraphic(null); return; }
+                var meta = new Label(LIST_DATE.format(item.created()) + " · " + state(item));
+                meta.getStyleClass().add("subject-meta");
+                var title = new Label(item.title());
+                title.setWrapText(true);
+                setGraphic(new VBox(3, title, meta));
             }
         });
         lectures.getSelectionModel().selectedItemProperty().addListener((obs, prior, value) -> updateButtons());
 
         details.setWrapText(true);
-        details.setText("Выберите предмет");
+        heading.setText("Выберите предмет");
         status.setWrapText(true);
 
         create.setOnAction(event -> editSubject(null));
@@ -133,20 +149,32 @@ final class SubjectsPanel extends VBox {
         });
         openLecture.setOnAction(event -> {
             var item = lectures.getSelectionModel().getSelectedItem();
-            if (item != null) openLectureInLibrary.accept(item.id());
+            if (item != null) openLectureInLibrary.accept(item);
         });
 
-        var listPane = new VBox(6, new Label("Предметы"), subjects);
+        var actions = new MenuButton("Действия", null, edit, moveAll, remove);
+        actions.disableProperty().bind(edit.disableProperty());
+        var transfer = new MenuButton("Ещё", null, moveOne);
+        transfer.disableProperty().bind(moveOne.disableProperty());
+        lectures.setOnKeyPressed(event -> {
+            if (event.getCode() == KeyCode.ENTER) { openLecture.fire(); event.consume(); }
+        });
+        heading.getStyleClass().add("subject-title");
+        statistics.getStyleClass().add("subject-meta");
+        heading.setWrapText(true);
+        details.managedProperty().bind(details.textProperty().isNotEmpty());
+        details.visibleProperty().bind(details.managedProperty());
+        var listPane = new VBox(8, new Label("Предметы"), search, order, subjects, create);
+        var right = new VBox(8, heading, details, statistics, new HBox(8, openSubject, actions),
+                new Label("Лекции предмета"), lectures, new HBox(8, openLecture, transfer));
+        listPane.getStyleClass().add("subject-pane");
+        right.getStyleClass().add("subject-pane");
         VBox.setVgrow(subjects, Priority.ALWAYS);
-        var lecturePane = new VBox(6, new Label("Лекции предмета"), lectures);
         VBox.setVgrow(lectures, Priority.ALWAYS);
-        var right = new VBox(8, details, lecturePane, new HBox(8, moveOne, openLecture));
         var split = new SplitPane(listPane, right);
-        split.setDividerPositions(0.36);
+        split.setDividerPositions(0.33);
         VBox.setVgrow(split, Priority.ALWAYS);
-
-        getChildren().addAll(new HBox(8, search, order, create), split,
-                new HBox(8, edit, remove, moveAll, openSubject, status));
+        getChildren().addAll(split, status);
         updateButtons();
     }
 
@@ -177,7 +205,7 @@ final class SubjectsPanel extends VBox {
     }
 
     private static String card(LectureLibrary.Subject item) {
-        return item.name() + "\n" + counts(item);
+        return item.name() + " · " + item.lectures() + " лекц.";
     }
 
     private static String counts(LectureLibrary.Subject item) {
@@ -228,7 +256,13 @@ final class SubjectsPanel extends VBox {
         if (focus != null) showSubject(focus);
         else {
             shown = null;
-            details.setText(search.getText().isBlank() ? "Выберите предмет" : "Ничего не найдено");
+            showSubject(null);
+            if (search.getText().isBlank()) subjects.setPlaceholder(new Label("Предметов пока нет"));
+            else {
+                var clear = new Button("Сбросить поиск");
+                clear.setOnAction(event -> search.clear());
+                subjects.setPlaceholder(new VBox(8, new Label("Ничего не найдено"), clear));
+            }
             lectures.getItems().clear();
         }
         say(visible.size() == all.size() ? "" : "Предметов найдено: " + visible.size());
@@ -239,13 +273,14 @@ final class SubjectsPanel extends VBox {
         shown = item;
         lectures.getItems().clear();
         if (item == null) {
-            details.setText("Выберите предмет");
+            heading.setText("Выберите предмет");
+            details.setText("");
+            statistics.setText("");
             return;
         }
-        var text = new StringBuilder(item.name());
-        if (!item.description().isBlank()) text.append('\n').append(item.description());
-        text.append('\n').append(counts(item));
-        details.setText(text.toString());
+        heading.setText(item.name());
+        statistics.setText(counts(item));
+        details.setText(item.description());
         long id = item.id();
         worker.execute(() -> {
             try {

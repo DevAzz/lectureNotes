@@ -1,18 +1,31 @@
 package org.example;
 
+import javafx.animation.AnimationTimer;
+import javafx.animation.PauseTransition;
+import javafx.geometry.Bounds;
 import javafx.geometry.Insets;
+import javafx.geometry.Point2D;
 import javafx.scene.Cursor;
 import javafx.scene.Node;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
+import javafx.scene.control.MenuItem;
 import javafx.scene.control.ScrollPane;
+import javafx.scene.input.Clipboard;
+import javafx.scene.input.ClipboardContent;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.MouseButton;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.ColumnConstraints;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
+import javafx.scene.shape.Path;
 import javafx.scene.text.Text;
 import javafx.scene.text.TextFlow;
+import javafx.util.Duration;
 
 import java.awt.Desktop;
 import java.net.URI;
@@ -41,6 +54,60 @@ final class MarkdownView extends ScrollPane {
     private static final String[] BULLETS = {"•", "◦", "▪"};
 
     private final VBox blocks = new VBox(10);
+    private final PauseTransition flash = new PauseTransition(Duration.seconds(2));
+    private final List<SelectableFlow> textFlows = new ArrayList<>();
+    private int anchor;
+    private int selectionEnd;
+    private int textLength;
+    private Point2D press;
+    private Point2D drag;
+    private boolean dragged;
+    private Path highlight;
+
+    private final AnimationTimer selectionScroll = new AnimationTimer() {
+        @Override public void handle(long now) {
+            Bounds viewport = viewportOnScene();
+            if (viewport == null || drag == null) return;
+            double outside = drag.getY() < viewport.getMinY() ? drag.getY() - viewport.getMinY()
+                    : Math.max(0, drag.getY() - viewport.getMaxY());
+            double scrollable = scrollableHeight();
+            if (outside == 0 || scrollable == 0) return;
+            setVvalue(Math.clamp(getVvalue() + Math.clamp(outside / 4, -28, 28) / scrollable, 0, 1));
+            extendSelection();
+        }
+    };
+
+    boolean reveal(String fragment) {
+        applyCss();
+        layout();
+        for (var flow : textFlows) {
+            int start = flow.text.indexOf(fragment);
+            if (start < 0) continue;
+            clearHighlight();
+            highlight = new Path(flow.rangeShape(start, start + fragment.length()));
+            highlight.setManaged(false);
+            highlight.setMouseTransparent(true);
+            highlight.getStyleClass().add("search-highlight");
+            flow.getChildren().add(highlight);
+            var bounds = blocks.sceneToLocal(highlight.localToScene(highlight.getBoundsInLocal()));
+            double height = getViewportBounds().getHeight();
+            double scrollable = scrollableHeight();
+            if (scrollable > 0) setVvalue(Math.clamp((bounds.getMinY() - height / 3) / scrollable, 0, 1));
+            flash.setOnFinished(event -> clearHighlight());
+            flash.playFromStart();
+            return true;
+        }
+        return false;
+    }
+
+    private void clearHighlight() {
+        flash.stop();
+        if (highlight != null) {
+            ((TextFlow) highlight.getParent()).getChildren().remove(highlight);
+            highlight = null;
+        }
+    }
+
     private LongConsumer onSeek = time -> { };
 
     MarkdownView() {
@@ -48,9 +115,153 @@ final class MarkdownView extends ScrollPane {
         setFitToWidth(true);
         setHbarPolicy(ScrollBarPolicy.NEVER);
         setVbarPolicy(ScrollBarPolicy.AS_NEEDED);
+        setFocusTraversable(true);
         blocks.getStyleClass().add("md-body");
+        blocks.setCursor(Cursor.TEXT);
         blocks.setPadding(new Insets(16, 20, 20, 20));
         setContent(blocks);
+        blocks.addEventFilter(MouseEvent.MOUSE_PRESSED, event -> {
+            if (event.getButton() != MouseButton.PRIMARY) return;
+            requestFocus();
+            press = new Point2D(event.getSceneX(), event.getSceneY());
+            dragged = false;
+            int offset = offsetAt(press);
+            if (!event.isShiftDown()) anchor = offset;
+            selectTo(offset);
+        });
+        blocks.addEventFilter(MouseEvent.MOUSE_DRAGGED, event -> {
+            if (press == null || !event.isPrimaryButtonDown()) return;
+            drag = new Point2D(event.getSceneX(), event.getSceneY());
+            if (!dragged && drag.distance(press) < 3) return;
+            dragged = true;
+            extendSelection();
+            selectionScroll.start();
+            event.consume();
+        });
+        blocks.addEventFilter(MouseEvent.MOUSE_RELEASED, event -> {
+            selectionScroll.stop();
+            press = drag = null;
+        });
+        blocks.addEventFilter(MouseEvent.MOUSE_CLICKED, event -> {
+            if (event.getButton() == MouseButton.PRIMARY && dragged) event.consume();
+        });
+        setOnKeyPressed(event -> {
+            if (!event.isShortcutDown()) return;
+            if (event.getCode() == KeyCode.C) copySelection();
+            else if (event.getCode() == KeyCode.A) {
+                anchor = 0;
+                if (!textFlows.isEmpty()) {
+                    var last = textFlows.getLast();
+                    selectTo(last.start + last.text.length());
+                }
+            } else return;
+            event.consume();
+        });
+        var copy = new MenuItem("Копировать");
+        copy.setOnAction(event -> copySelection());
+        var menu = new ContextMenu(copy);
+        menu.setOnShowing(event -> copy.setDisable(anchor == selectionEnd));
+        setContextMenu(menu);
+    }
+
+    double scrollableHeight() {
+        return Math.max(0, blocks.getHeight() - getViewportBounds().getHeight());
+    }
+
+    private Bounds viewportOnScene() {
+        var viewport = lookup(".viewport");
+        return viewport == null ? null : viewport.localToScene(viewport.getLayoutBounds());
+    }
+
+    private void extendSelection() {
+        Bounds viewport = viewportOnScene();
+        if (viewport == null) return;
+        selectTo(offsetAt(new Point2D(drag.getX(), Math.clamp(drag.getY(), viewport.getMinY(), viewport.getMaxY()))));
+    }
+
+    private int offsetAt(Point2D point) {
+        SelectableFlow nearest = null;
+        double distance = Double.POSITIVE_INFINITY;
+        for (var flow : textFlows) {
+            if (flow.text.isEmpty()) continue;
+            Bounds bounds = flow.localToScene(flow.getLayoutBounds());
+            double dy = Math.max(bounds.getMinY() - point.getY(), point.getY() - bounds.getMaxY());
+            double dx = Math.max(bounds.getMinX() - point.getX(), point.getX() - bounds.getMaxX());
+            double current = Math.hypot(Math.max(0, dx), Math.max(0, dy));
+            if (current >= distance) continue;
+            nearest = flow;
+            distance = current;
+            if (distance == 0) break;
+        }
+        if (nearest == null) return 0;
+        Point2D local = nearest.sceneToLocal(point);
+        int offset = nearest.hitTest(local).getInsertionIndex();
+        return nearest.start + Math.clamp(offset, 0, nearest.text.length());
+    }
+
+    private void selectTo(int end) {
+        selectionEnd = end;
+        for (var flow : textFlows) flow.paintSelection();
+    }
+
+    private void copySelection() {
+        if (anchor == selectionEnd) return;
+        var content = new ClipboardContent();
+        content.putString(selectedText());
+        Clipboard.getSystemClipboard().setContent(content);
+    }
+
+    String selectedText() {
+        int start = Math.min(anchor, selectionEnd);
+        int end = Math.max(anchor, selectionEnd);
+        var result = new StringBuilder();
+        for (var flow : textFlows) {
+            int from = Math.max(start - flow.start, 0);
+            int to = Math.min(end - flow.start, flow.text.length());
+            if (from < to) result.append(flow.text, from, to);
+            int after = flow.start + flow.text.length();
+            if (start <= after && end > after) result.append(flow.separator);
+        }
+        return result.toString();
+    }
+
+    private SelectableFlow register(SelectableFlow flow, List<Node> nodes, String separator) {
+        for (var node : nodes) flow.getChildren().add(node);
+        var text = new StringBuilder();
+        for (var node : nodes) if (node instanceof Text span) text.append(span.getText());
+        flow.text = text.toString();
+        flow.start = textLength;
+        flow.separator = separator;
+        textLength += flow.text.length() + separator.length();
+        textFlows.add(flow);
+        return flow;
+    }
+
+    private final class SelectableFlow extends TextFlow {
+        private final Path selection = new Path();
+        private String text;
+        private String separator;
+        private int start;
+
+        SelectableFlow() {
+            selection.setManaged(false);
+            selection.setMouseTransparent(true);
+            selection.getStyleClass().add("md-selection");
+        }
+
+        @Override protected void layoutChildren() {
+            super.layoutChildren();
+            paintSelection();
+        }
+
+        void paintSelection() {
+            int from = Math.max(0, Math.min(anchor, selectionEnd) - start);
+            int to = Math.min(text.length(), Math.max(anchor, selectionEnd) - start);
+            if (from < to) {
+                selection.getElements().setAll(rangeShape(from, to));
+                if (selection.getParent() == null) getChildren().addFirst(selection);
+            } else if (selection.getParent() != null) getChildren().remove(selection);
+        }
     }
 
     void setOnSeek(LongConsumer handler) {
@@ -58,6 +269,11 @@ final class MarkdownView extends ScrollPane {
     }
 
     void setMarkdown(String source) {
+        clearHighlight();
+        selectionScroll.stop();
+        press = drag = null;
+        anchor = selectionEnd = textLength = 0;
+        textFlows.clear();
         blocks.getChildren().clear();
         String text = source == null ? "" : source.replace("\r\n", "\n").replace('\r', '\n');
         if (text.isBlank()) {
@@ -146,14 +362,15 @@ final class MarkdownView extends ScrollPane {
         }
         var code = new Text(body.toString().stripTrailing());
         code.getStyleClass().add("md-code-text");
-        var flow = new TextFlow(code);
-        flow.getStyleClass().add("md-code-block");
-        if (language.isBlank()) target.getChildren().add(flow);
-        else {
+        SelectableFlow captionFlow = null;
+        if (!language.isBlank()) {
             var caption = new Text(language.strip());
             caption.getStyleClass().add("md-code-lang");
-            target.getChildren().add(new VBox(2, caption, flow));
+            captionFlow = register(new SelectableFlow(), List.of(caption), "\n");
         }
+        var flow = register(new SelectableFlow(), List.of(code), "\n");
+        flow.getStyleClass().add("md-code-block");
+        target.getChildren().add(captionFlow == null ? flow : new VBox(2, captionFlow, flow));
         return index + 1;
     }
 
@@ -176,11 +393,13 @@ final class MarkdownView extends ScrollPane {
             constraint.setHgrow(Priority.ALWAYS);
             grid.getColumnConstraints().add(constraint);
         }
-        for (int column = 0; column < columns; column++) grid.add(cell(header.get(column), "md-th"), column, 0);
+        for (int column = 0; column < columns; column++)
+            grid.add(cell(header.get(column), "md-th", column == columns - 1), column, 0);
         int row = 1;
         for (var values : rows) {
             for (int column = 0; column < columns; column++) {
-                grid.add(cell(column < values.size() ? values.get(column) : "", "md-td"), column, row);
+                grid.add(cell(column < values.size() ? values.get(column) : "", "md-td", column == columns - 1),
+                        column, row);
             }
             row++;
         }
@@ -212,8 +431,8 @@ final class MarkdownView extends ScrollPane {
         return values;
     }
 
-    private Node cell(String value, String style) {
-        var flow = paragraph(value);
+    private Node cell(String value, String style, boolean endOfRow) {
+        var flow = paragraph(value, endOfRow ? "\n" : "\t");
         flow.getStyleClass().add("md-cell");
         flow.getStyleClass().add(style);
         return flow;
@@ -278,7 +497,7 @@ final class MarkdownView extends ScrollPane {
             var mark = new Text(marker);
             mark.getStyleClass().add("md-text");
             decorate(List.of(mark), style);
-            var markFlow = new TextFlow(mark);
+            var markFlow = register(new SelectableFlow(), List.of(mark), " ");
             markFlow.getStyleClass().add("md-marker");
             var content = new VBox(4);
             content.getChildren().add(paragraph(text));
@@ -295,9 +514,14 @@ final class MarkdownView extends ScrollPane {
     }
 
     private TextFlow paragraph(String source) {
-        var flow = new TextFlow();
+        return paragraph(source, "\n");
+    }
+
+    private TextFlow paragraph(String source, String separator) {
+        var nodes = new ArrayList<Node>();
+        inline(source, nodes);
+        var flow = register(new SelectableFlow(), nodes, separator);
         flow.getStyleClass().add("md-para");
-        inline(source, flow.getChildren());
         return flow;
     }
 

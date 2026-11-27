@@ -70,6 +70,7 @@ final class LectureDocuments {
     private int requestedOrdinal;
     private long selection;
     private boolean loading;
+    private RussianSearch.Match pendingMatch;
     private boolean closed;
     private Runnable openSettings = () -> { };
     private List<LectureLibrary.Profile> profiles = List.of();
@@ -206,6 +207,7 @@ final class LectureDocuments {
             updateButtons();
             return;
         }
+        pendingMatch = null;
         requestedOrdinal = ordinal;
         selected = item;
         long request = ++selection;
@@ -233,6 +235,7 @@ final class LectureDocuments {
                     reading.setText(saved.readingText() == null ? "" : saved.readingText());
                     loading = false;
                     showStatus("");
+                    if (pendingMatch != null) revealMatch(pendingMatch);
                     updateButtons();
                 });
             } catch (Exception error) {
@@ -241,6 +244,11 @@ final class LectureDocuments {
                 });
             }
         });
+    }
+
+    void revealMatch(RussianSearch.Match match) {
+        pendingMatch = loading ? match : null;
+        if (!loading && !noteEditor.revealMatch(match)) showStatus("Фрагмент изменён. Обновите поиск.");
     }
 
     private void selectRequestedSegment() {

@@ -1,4 +1,12 @@
 package org.example;
+import javafx.geometry.Pos;
+import javafx.scene.control.TitledPane;
+import javafx.beans.binding.Bindings;
+import javafx.beans.property.SimpleBooleanProperty;
+import javafx.beans.property.SimpleStringProperty;
+import javafx.beans.property.StringProperty;
+import java.util.HashMap;
+import java.util.Map;
 
 import javafx.application.Platform;
 import javafx.concurrent.Task;
@@ -75,6 +83,7 @@ final class SettingsPanel extends VBox {
     private final Label libraryStatus = status();
     private final Label aboutStatus = status();
 
+    private final Map<TextField, StringProperty> savedPaths = new HashMap<>();
     private boolean writing;
     private boolean closed;
 
@@ -140,11 +149,11 @@ final class SettingsPanel extends VBox {
         var whisperForm = DesktopDialogs.fields();
         DesktopDialogs.field(whisperForm, 0, "whisper-cli.exe", whisperExecutable);
         DesktopDialogs.field(whisperForm, 1, "Файл модели", whisperModel);
-        DesktopDialogs.field(whisperForm, 2, "Язык распознавания", whisperLanguage);
+
         whisperForm.add(pickExecutable, 2, 0);
         whisperForm.add(pickModel, 2, 1);
-        whisperForm.add(whisperCpu, 2, 2);
-        whisperForm.add(new HBox(8, saveWhisper, resetWhisper), 1, 3);
+        var language = new HBox(8, new Label("Язык распознавания"), whisperLanguage, whisperCpu);
+        whisperForm.add(resetWhisper, 1, 2);
 
         var diarizationForm = DesktopDialogs.fields();
         segmentationModel.setId("diarization-segmentation");
@@ -166,21 +175,25 @@ final class SettingsPanel extends VBox {
             Path segmentation = path(segmentationModel.getText());
             Path embedding = path(embeddingModel.getText());
             mutate(() -> library.saveDiarizationModels(segmentation, embedding),
-                    () -> say(diarizationStatus, "Модели сохранены."), diarizationStatus);
+                    () -> {
+                        savedPaths.get(segmentationModel).set(segmentation.toString());
+                        savedPaths.get(embeddingModel).set(embedding.toString());
+                        say(diarizationStatus, "Модели сохранены.");
+                    }, diarizationStatus);
         });
-        diarizationForm.add(new HBox(8, saveDiarization, resetModels), 1, 2);
+        diarizationForm.add(resetModels, 1, 2);
 
         var body = new VBox(12,
                 card("Модели и профили генерации",
                         profiles,
                         new HBox(8, addProfile, editProfile, removeProfile, primaryProfile, testProfile),
                         profileStatus),
-                card("Распознавание речи (Whisper)", whisperForm,
-                        modelRow(StandardModel.TURBO, whisperModel, saveWhisper),
-                        modelRow(StandardModel.FULL, whisperModel, saveWhisper), whisperStatus),
-                card("Диаризация (sherpa-onnx)", diarizationForm,
-                        modelRow(StandardModel.SEGMENTATION, segmentationModel, saveDiarization),
-                        modelRow(StandardModel.EMBEDDING, embeddingModel, saveDiarization), diarizationStatus),
+                card("Распознавание речи (Whisper)", language,
+                        modelRow(StandardModel.TURBO, whisperModel),
+                        modelRow(StandardModel.FULL, whisperModel), paths(whisperForm), saveWhisper, whisperStatus),
+                card("Разделение по голосам",
+                        modelRow(StandardModel.SEGMENTATION, segmentationModel),
+                        modelRow(StandardModel.EMBEDDING, embeddingModel), paths(diarizationForm), saveDiarization, diarizationStatus),
                 card("Конспект", notePrompt,
                         new HBox(8, new Label("Лимит времени, мин"), noteLimit, saveNoteSettings, restorePrompt),
                         noteStatus),
@@ -205,14 +218,32 @@ final class SettingsPanel extends VBox {
         worker.shutdown();
     }
 
-    private HBox modelRow(StandardModel model, TextField field, Button save) {
+    private static TitledPane paths(Node form) {
+        var pane = new TitledPane("Пути к файлам", form);
+        pane.setAnimated(false);
+        pane.setExpanded(false);
+        return pane;
+    }
+
+    private HBox modelRow(StandardModel model, TextField field) {
         var installed = Files.isRegularFile(model.path());
         var button = new Button(installed ? "Выбрать" : "Скачать");
-        var status = new Label(installed ? "Скачана" : "");
+        var status = new Label();
+        var saved = savedPaths.computeIfAbsent(field, unused -> new SimpleStringProperty());
+        var available = new SimpleBooleanProperty(installed);
+        var progress = new SimpleStringProperty("");
+        status.textProperty().bind(Bindings.createStringBinding(() -> {
+            if (!progress.get().isEmpty()) return progress.get();
+            if (!available.get()) return "Доступна для скачивания";
+            if (model.path().equals(path(field.getText())))
+                return model.path().toString().equals(saved.get()) ? "Используется" : "Выбрана · требуется сохранение";
+            return "Скачана";
+        }, saved, available, progress, field.textProperty()));
         status.setWrapText(true);
         Runnable select = () -> {
             field.setText(model.path().toString());
-            status.setText("Выбрана. Нажмите «" + save.getText() + "».");
+            available.set(true);
+            progress.set("");
             button.setText("Выбрать");
         };
         button.setOnAction(event -> {
@@ -234,8 +265,8 @@ final class SettingsPanel extends VBox {
                 }
             };
             button.setDisable(true);
-            status.setText("В очереди…");
-            task.messageProperty().addListener((obs, old, value) -> status.setText(value));
+            progress.set("В очереди…");
+            task.messageProperty().addListener((obs, old, value) -> progress.set(value));
             task.setOnSucceeded(done -> {
                 if (closed) return;
                 button.setDisable(false);
@@ -245,12 +276,18 @@ final class SettingsPanel extends VBox {
                 if (closed) return;
                 button.setText("Повторить");
                 button.setDisable(false);
-                status.setText("Не удалось скачать модель. " + task.getException().getLocalizedMessage());
+                progress.set("Не удалось скачать модель. " + task.getException().getLocalizedMessage());
             });
             downloads.execute(task);
         });
         button.accessibleTextProperty().bind(button.textProperty().concat(" " + model.title));
-        return new HBox(8, new Label(model.title), button, status);
+        var info = new VBox(2, new Label(model.title), status);
+        status.getStyleClass().add("subject-meta");
+        HBox.setHgrow(info, Priority.ALWAYS);
+        button.setPrefWidth(110);
+        var row = new HBox(12, info, button);
+        row.setAlignment(Pos.CENTER_LEFT);
+        return row;
     }
 
     /** Перечитывает сохранённые настройки после изменений в библиотеке. */
@@ -275,6 +312,9 @@ final class SettingsPanel extends VBox {
                     } else if (!savedProfiles.isEmpty()) profiles.getSelectionModel().selectFirst();
                     if (!writing) {
                         showModels(models);
+                        savedPaths.get(segmentationModel).set(models.segmentation().toString());
+                        savedPaths.get(embeddingModel).set(models.embedding().toString());
+                        savedPaths.get(whisperModel).set(whisper.model().toString());
                         whisperExecutable.setText(whisper.executable().toString());
                         whisperModel.setText(whisper.model().toString());
                         whisperCpu.setSelected(whisper.cpu());
@@ -443,7 +483,7 @@ final class SettingsPanel extends VBox {
         mutate(() -> library.saveWhisperSettings(executable, model, cpu, language), () -> {
             load();
             settingsSaved.run();
-        });
+        }, whisperStatus);
     }
 
     private void useBundledWhisper() {
