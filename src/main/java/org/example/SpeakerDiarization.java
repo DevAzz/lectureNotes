@@ -28,6 +28,13 @@ final class SpeakerDiarization {
 
     record Turn(long start, long end, int speaker) {}
 
+    record Models(Path segmentation, Path embedding) {
+        static Models bundled() {
+            Path directory = bundledDirectory();
+            return new Models(directory.resolve("segmentation.onnx"), directory.resolve("embedding.onnx"));
+        }
+    }
+
     static Path bundledDirectory() {
         try {
             Path code = Path.of(SpeakerDiarization.class.getProtectionDomain().getCodeSource().getLocation().toURI());
@@ -37,14 +44,17 @@ final class SpeakerDiarization {
         }
     }
 
-    static List<LocalProcessing.Segment> label(Recording recording, List<LocalProcessing.Segment> segments)
+    static List<LocalProcessing.Segment> label(Recording recording, List<LocalProcessing.Segment> segments, Models models)
             throws IOException, InterruptedException {
         Path engine = bundledDirectory();
         Path executable = engine.resolve(EXECUTABLE);
-        Path segmentation = engine.resolve("segmentation.onnx");
-        Path embedding = engine.resolve("embedding.onnx");
-        if (!Files.isRegularFile(executable) || !Files.isRegularFile(segmentation) || !Files.isRegularFile(embedding)) {
+        Path segmentation = models.segmentation();
+        Path embedding = models.embedding();
+        if (!Files.isRegularFile(executable)) {
             throw new IOException("В этой сборке нет движка разметки спикеров.");
+        }
+        for (Path model : List.of(segmentation, embedding)) {
+            if (!Files.isRegularFile(model)) throw new IOException("Не найден файл модели диаризации: " + model);
         }
         var chunks = recording.chunks();
         if (chunks.isEmpty()) throw new IOException("Сохранённые WAV для разметки спикеров отсутствуют.");
@@ -55,7 +65,7 @@ final class SpeakerDiarization {
             writeAudio(wav, chunks);
             int threads = Math.min(4, Runtime.getRuntime().availableProcessors());
             var command = List.of(executable.toString(), "--segmentation.pyannote-model=" + segmentation,
-                    "--embedding.model=" + embedding, "--clustering.cluster-threshold=0.5",
+                    "--embedding.model=" + embedding, "--clustering.cluster-threshold=0.6",
                     "--segmentation.num-threads=" + threads, "--embedding.num-threads=" + threads,
                     wav.getFileName().toString());
             Process process = new ProcessBuilder(command).directory(work.toFile()).redirectOutput(output.toFile())

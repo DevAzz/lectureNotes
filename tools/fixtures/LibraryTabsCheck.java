@@ -85,6 +85,8 @@ public final class LibraryTabsCheck {
         var model = bundled.available() ? bundled.model()
                 : Files.writeString(work.resolve("check-model.bin"), "placeholder");
         library.saveWhisperSettings(cli, model, true, "ru");
+        library.saveDiarizationModels(Files.createFile(work.resolve("segments-test.onnx")),
+                Files.createFile(work.resolve("voices-test.onnx")));
         library.saveNoteSettings("Собери конспект свободным текстом.", 25);
         library.saveProfile(null, "Внешний API", "https://example.com/v1", "большая модель", true,
                 16_000, 1_000, 300, null, false);
@@ -155,7 +157,7 @@ public final class LibraryTabsCheck {
             stage.show();
             settingsPanel.initialize();
         });
-        require(settingsPanel.lookupAll(".settings-card").size() == 5, "five settings cards");
+        require(settingsPanel.lookupAll(".settings-card").size() == 6, "six settings cards");
         var captions = new StringBuilder();
         for (var node : settingsPanel.lookupAll(".settings-title")) captions.append(((Label) node).getText()).append(' ');
         require(captions.toString().contains("Модели и профили генерации")
@@ -174,6 +176,9 @@ public final class LibraryTabsCheck {
 
         awaitTrue(() -> !field("#whisper-executable").getText().isBlank()
                 && field("#whisper-model").getText().endsWith(".bin"), "Whisper paths come from the saved settings");
+        awaitTrue(() -> field("#diarization-segmentation").getText().endsWith("segments-test.onnx")
+                && field("#diarization-embedding").getText().endsWith("voices-test.onnx"),
+                "both diarization paths come from the saved settings");
         awaitTrue(() -> ((TextArea) node("#note-prompt")).getText().contains("Собери конспект свободным текстом"),
                 "the saved system prompt is shown");
         awaitTrue(() -> "25".equals(field("#note-limit").getText()), "the saved time limit is shown");

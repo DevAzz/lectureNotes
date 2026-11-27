@@ -55,6 +55,10 @@ final class SettingsPanel extends VBox {
     private final CheckBox whisperCpu = new CheckBox("Только CPU");
     private final ComboBox<String> whisperLanguage = new ComboBox<>();
     private final Label whisperStatus = status();
+    private final TextField segmentationModel = new TextField();
+    private final TextField embeddingModel = new TextField();
+    private final Label diarizationStatus = status();
+    private final Button saveDiarization = new Button("Сохранить модели");
     private final Button pickExecutable = new Button("Файл whisper-cli.exe…");
     private final Button pickModel = new Button("Файл модели…");
     private final Button saveWhisper = new Button("Сохранить движок");
@@ -140,12 +144,37 @@ final class SettingsPanel extends VBox {
         whisperForm.add(whisperCpu, 2, 2);
         whisperForm.add(new HBox(8, saveWhisper, resetWhisper), 1, 3);
 
+        var diarizationForm = DesktopDialogs.fields();
+        segmentationModel.setId("diarization-segmentation");
+        embeddingModel.setId("diarization-embedding");
+        DesktopDialogs.field(diarizationForm, 0, "Сегментация речи (pyannote)", segmentationModel);
+        DesktopDialogs.field(diarizationForm, 1, "Сравнение голосов", embeddingModel);
+        var pickSegmentation = new Button("Выбрать файл…");
+        var pickEmbedding = new Button("Выбрать файл…");
+        pickSegmentation.setOnAction(event -> chooseFile(segmentationModel, "Модель сегментации", "*.onnx"));
+        pickEmbedding.setOnAction(event -> chooseFile(embeddingModel, "Модель сравнения голосов", "*.onnx"));
+        diarizationForm.add(pickSegmentation, 2, 0);
+        diarizationForm.add(pickEmbedding, 2, 1);
+        var resetModels = new Button("Встроенные модели");
+        resetModels.setOnAction(event -> {
+            showModels(SpeakerDiarization.Models.bundled());
+            say(diarizationStatus, "Нажмите «Сохранить модели», чтобы применить выбор.");
+        });
+        saveDiarization.setOnAction(event -> {
+            Path segmentation = path(segmentationModel.getText());
+            Path embedding = path(embeddingModel.getText());
+            mutate(() -> library.saveDiarizationModels(segmentation, embedding),
+                    () -> say(diarizationStatus, "Модели сохранены."), diarizationStatus);
+        });
+        diarizationForm.add(new HBox(8, saveDiarization, resetModels), 1, 2);
+
         var body = new VBox(12,
                 card("Модели и профили генерации",
                         profiles,
                         new HBox(8, addProfile, editProfile, removeProfile, primaryProfile, testProfile),
                         profileStatus),
                 card("Распознавание речи (Whisper)", whisperForm, whisperStatus),
+                card("Диаризация (sherpa-onnx)", diarizationForm, diarizationStatus),
                 card("Конспект", notePrompt,
                         new HBox(8, new Label("Лимит времени, мин"), noteLimit, saveNoteSettings, restorePrompt),
                         noteStatus),
@@ -176,6 +205,7 @@ final class SettingsPanel extends VBox {
             try {
                 var savedProfiles = library.profiles();
                 var whisper = library.whisperSettings();
+                var models = library.diarizationModels();
                 String language = library.whisperLanguage();
                 String prompt = library.noteSystemPrompt();
                 int minutes = library.noteTimeLimitMinutes();
@@ -189,6 +219,7 @@ final class SettingsPanel extends VBox {
                                 .findFirst().ifPresent(profiles.getSelectionModel()::select);
                     } else if (!savedProfiles.isEmpty()) profiles.getSelectionModel().selectFirst();
                     if (!writing) {
+                        showModels(models);
                         whisperExecutable.setText(whisper.executable().toString());
                         whisperModel.setText(whisper.model().toString());
                         whisperCpu.setSelected(whisper.cpu());
@@ -344,6 +375,11 @@ final class SettingsPanel extends VBox {
         if (selected != null) target.setText(selected.toPath().toAbsolutePath().normalize().toString());
     }
 
+    private void showModels(SpeakerDiarization.Models models) {
+        segmentationModel.setText(models.segmentation().toString());
+        embeddingModel.setText(models.embedding().toString());
+    }
+
     private void saveWhisper() {
         Path executable = path(whisperExecutable.getText());
         Path model = path(whisperModel.getText());
@@ -393,6 +429,10 @@ final class SettingsPanel extends VBox {
     private interface Mutation { void call() throws Exception; }
 
     private void mutate(Mutation operation, Runnable completed) {
+        mutate(operation, completed, profileStatus);
+    }
+
+    private void mutate(Mutation operation, Runnable completed, Label errorStatus) {
         writing = true;
         updateButtons();
         worker.execute(() -> {
@@ -409,7 +449,7 @@ final class SettingsPanel extends VBox {
                     if (closed) return;
                     writing = false;
                     updateButtons();
-                    say(profileStatus, error instanceof IOException && error.getMessage() != null
+                    say(errorStatus, error instanceof IOException && error.getMessage() != null
                             ? error.getMessage() : "Не удалось сохранить настройки.");
                 });
             }
@@ -425,6 +465,7 @@ final class SettingsPanel extends VBox {
         primaryProfile.setDisable(!ready || !selected);
         testProfile.setDisable(!ready || !selected);
         saveWhisper.setDisable(!ready);
+        saveDiarization.setDisable(!ready);
         resetWhisper.setDisable(!ready);
         saveNoteSettings.setDisable(!ready);
         restorePrompt.setDisable(!ready);

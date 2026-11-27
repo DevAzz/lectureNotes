@@ -705,6 +705,32 @@ final class LectureLibrary implements AutoCloseable {
         }
     }
 
+    synchronized SpeakerDiarization.Models diarizationModels() throws SQLException {
+        var defaults = SpeakerDiarization.Models.bundled();
+        return new SpeakerDiarization.Models(
+                Path.of(setting("diarization_segmentation", defaults.segmentation().toString())),
+                Path.of(setting("diarization_embedding", defaults.embedding().toString())));
+    }
+
+    synchronized void saveDiarizationModels(Path segmentation, Path embedding) throws SQLException, IOException {
+        var defaults = SpeakerDiarization.Models.bundled();
+        transaction(() -> {
+            saveDiarizationModel("diarization_segmentation", segmentation, defaults.segmentation());
+            saveDiarizationModel("diarization_embedding", embedding, defaults.embedding());
+            return null;
+        });
+    }
+
+    private void saveDiarizationModel(String key, Path model, Path bundled) throws SQLException, IOException {
+        if (model == null || !Files.isRegularFile(model) || !Files.isReadable(model)
+                || !model.toString().toLowerCase(java.util.Locale.ROOT).endsWith(".onnx")) {
+            throw new IOException("Выберите доступный файл модели в формате ONNX.");
+        }
+        Path absolute = model.toAbsolutePath().normalize();
+        if (absolute.equals(bundled)) update("DELETE FROM app_setting WHERE name=?", key);
+        else saveSetting(key, absolute.toString());
+    }
+
     synchronized LocalProcessing.Whisper whisperSettings() throws SQLException {
         var bundled = LocalProcessing.bundledWhisper(false);
         if (!bundled.available()) bundled = LocalProcessing.bundledWhisper(true);

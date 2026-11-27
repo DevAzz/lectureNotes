@@ -8,6 +8,8 @@ import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
+import javafx.scene.control.MenuItem;
+import javafx.scene.control.SplitMenuButton;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.layout.HBox;
@@ -46,7 +48,7 @@ final class LectureDocuments {
     private final Button modelSettings = new Button("Настройки моделей");
     private final Button playLine = new Button("Прослушать реплику");
     private final Button editLine = new Button("Изменить реплику");
-    private final Button diarize = new Button("Разметить спикеров");
+    private final SplitMenuButton diarize = new SplitMenuButton();
     private final Button renameSpeaker = new Button("Переименовать спикера");
     private final Button exportTranscript = new Button("Экспорт Markdown");
     private final Button generate = new Button("Сформировать конспект");
@@ -135,7 +137,11 @@ final class LectureDocuments {
         modelSettings.setOnAction(event -> openSettings.run());
         playLine.setOnAction(event -> playSegment());
         editLine.setOnAction(event -> editSegment());
-        diarize.setOnAction(event -> startDiarization());
+        diarize.setText("Разметить спикеров");
+        diarize.setOnAction(event -> startDiarization(false));
+        var singleSpeaker = new MenuItem("Один спикер на всю лекцию");
+        singleSpeaker.setOnAction(event -> startDiarization(true));
+        diarize.getItems().setAll(singleSpeaker);
         renameSpeaker.setOnAction(event -> renameSpeaker());
         exportTranscript.setOnAction(event -> {
             var markdown = new StringBuilder("# ").append(selected.title()).append("\n\n");
@@ -290,15 +296,17 @@ final class LectureDocuments {
         }, true);
     }
 
-    private void startDiarization() {
+    private void startDiarization(boolean singleSpeaker) {
         String id = selected.id();
         long expectedVersion = transcriptId;
         var source = List.copyOf(transcript.getItems());
         if (source.stream().anyMatch(segment -> segment.speaker() != null)
                 && !DesktopDialogs.confirm(owner, "Разметка спикеров", "Заменить текущие метки спикеров?")) return;
         int index = transcript.getSelectionModel().getSelectedIndex();
-        run("Определяем спикеров по записи", () -> {
-            var labeled = SpeakerDiarization.label(new Recording(library.recordingsPath(id)), source);
+        run("Размечаем спикеров", () -> {
+            var labeled = singleSpeaker
+                    ? source.stream().map(s -> new LocalProcessing.Segment(s.start(), s.end(), s.text(), "Спикер 1", null)).toList()
+                    : SpeakerDiarization.label(new Recording(library.recordingsPath(id)), source, library.diarizationModels());
             long version = library.replaceTranscript(id, expectedVersion, labeled);
             return () -> showLabeledTranscript(version, labeled, index);
         }, true);
