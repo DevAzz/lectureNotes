@@ -158,7 +158,11 @@ public final class ProcessingCheck {
                         return;
                     }
                     String payload;
-                    if (prompt.contains("\"model\":\"keyed-note\"")) {
+                    if (prompt.contains(LocalProcessing.READING_PROMPT.lines().findFirst().orElseThrow())) {
+                        payload = """
+                                {"choices":[{"finish_reason":"stop","message":{"content":"[2]"}}]}
+                                """;
+                    } else if (prompt.contains("\"model\":\"keyed-note\"")) {
                         if (!"Bearer sk-test-700".equals(exchange.getRequestHeaders().getFirst("Authorization"))) {
                             exchange.sendResponseHeaders(401, -1);
                             return;
@@ -200,6 +204,17 @@ public final class ProcessingCheck {
             try {
                 URI api = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
                 var local = new LocalProcessing.Llm(api.toString(), "iq3_s", "", 0, 900, false);
+                String reading = LocalProcessing.formatReading(segments, local, LocalProcessing.READING_PROMPT,
+                        Duration.ofSeconds(10));
+                check(reading.equals(segments.getFirst().text() + "\n\n" + segments.getLast().text()),
+                        "Paragraph boundaries preserve the original speech verbatim");
+                long current = library.documents(lectureId).transcriptId();
+                library.saveReadingText(lectureId, current, reading);
+                check(reading.equals(library.documents(lectureId).readingText()), "Reading text stored separately");
+                try {
+                    library.saveReadingText(lectureId, transcriptId, "Устаревшая версия");
+                    throw new AssertionError("An outdated reading replaced the current one");
+                } catch (java.io.IOException expected) { }
                 String generated = LocalProcessing.generate("Скорость изменения", segments, local,
                         "", LocalProcessing.DEFAULT_SYSTEM_PROMPT, Duration.ofSeconds(10));
                 library.saveNote(lectureId, transcriptId, generated, true);

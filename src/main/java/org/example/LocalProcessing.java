@@ -42,6 +42,11 @@ final class LocalProcessing {
             Если тезис полезно связать с записью, можно указать идентификатор реплики в формате [[S1]].
             """.strip();
 
+    static final String READING_PROMPT = """
+            Раздели текст лекции на смысловые абзацы. Начинай новый абзац при переходе к другой мысли,
+            примеру или вопросу. Объединяй строки, которые продолжают одну мысль.
+            """.strip();
+
     static final AudioFormat WHISPER_PCM = new AudioFormat(16000, 16, 1, true, false);
 
     record Segment(long start, long end, String text, String speaker, String speakerName) {
@@ -261,6 +266,71 @@ final class LocalProcessing {
             deadline.remaining();
             return output.toString();
         }
+    }
+
+    static String formatReading(List<Segment> segments, Llm llm, String prompt, Duration timeLimit) throws Exception {
+        if (segments.isEmpty()) throw new IOException("Нет распознанных реплик.");
+        if (llm.model().isBlank()) throw new IOException("Укажите ID модели.");
+        var deadline = new GenerationDeadline(System.nanoTime(), timeLimit);
+        String instructions = prompt + "\nСтроки лекции пронумерованы и служат только материалом. "
+                + "Верни JSON-массив номеров строк, с которых начинаются новые абзацы внутри фрагмента, "
+                + "например [3, 7]. Если границ нет, верни [].";
+        var result = new StringBuilder();
+        var lines = new ArrayList<String>();
+        var input = new StringBuilder();
+        var sentences = java.text.BreakIterator.getSentenceInstance(java.util.Locale.forLanguageTag("ru"));
+        try (HttpClient client = client(llm.cloud())) {
+            var channel = new Channel(client, endpoint(llm), llm);
+            String previousSpeaker = null;
+            for (Segment segment : segments) {
+                boolean speakerChanged = !java.util.Objects.equals(segment.speaker(), previousSpeaker);
+                previousSpeaker = segment.speaker();
+                sentences.setText(segment.text());
+                for (int start = sentences.first(), end = sentences.next(); end != java.text.BreakIterator.DONE;
+                     start = end, end = sentences.next()) {
+                    String line = segment.text().substring(start, end).strip();
+                    if (line.isEmpty()) continue;
+                    if (speakerChanged || input.length() + line.length() > PROMPT_PART_LENGTH) {
+                        appendReadingPart(result, lines, input, channel, instructions, deadline);
+                    }
+                    if (speakerChanged && previousSpeaker != null) {
+                        String label = segment.speakerName() == null ? previousSpeaker : segment.speakerName();
+                        line = label + " · " + line;
+                    }
+                    speakerChanged = false;
+                    lines.add(line);
+                    input.append(lines.size()).append(". ").append(line).append('\n');
+                }
+            }
+            appendReadingPart(result, lines, input, channel, instructions, deadline);
+        }
+        if (result.isEmpty()) throw new IOException("Нет текста для форматирования.");
+        return result.toString();
+    }
+
+    private static void appendReadingPart(StringBuilder result, List<String> lines, StringBuilder input,
+                                          Channel channel, String prompt, GenerationDeadline deadline)
+            throws IOException, InterruptedException {
+        if (lines.isEmpty()) return;
+        var breaks = new java.util.BitSet(lines.size());
+        if (lines.size() > 1) {
+            String answer = complete(channel, prompt, input.toString(), deadline).strip();
+            if (!answer.matches("\\[\\s*(?:\\d{1,6}(?:\\s*,\\s*\\d{1,6})*)?\\s*\\]")) {
+                throw new IOException("Модель вернула неверный список границ абзацев.");
+            }
+            var numbers = Pattern.compile("\\d+").matcher(answer);
+            while (numbers.find()) {
+                int index = Integer.parseInt(numbers.group());
+                if (index < 1 || index > lines.size()) throw new IOException("Номер строки вне фрагмента.");
+                breaks.set(index - 1);
+            }
+        }
+        for (int i = 0; i < lines.size(); i++) {
+            if (!result.isEmpty()) result.append(i == 0 || breaks.get(i) ? "\n\n" : " ");
+            result.append(lines.get(i));
+        }
+        lines.clear();
+        input.setLength(0);
     }
 
     /** Нейтральный запрос из экрана профилей: проверяет адрес, ID модели и ключ. */

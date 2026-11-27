@@ -40,6 +40,11 @@ final class LectureDocuments {
     private final Runnable onPublished;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ListView<LocalProcessing.Segment> transcript = new ListView<>();
+    private final TextArea reading = new TextArea();
+    private final Label readingStatus = new Label();
+    private final Button format = new Button("Разбить на абзацы");
+    private final Button exportReading = new Button("Экспорт Markdown");
+    private String readingPrompt = LocalProcessing.READING_PROMPT;
     private final TextArea note = new TextArea();
     private final MarkdownEditor noteEditor;
     private final Label status = new Label();
@@ -79,6 +84,7 @@ final class LectureDocuments {
         this.onPublished = onPublished;
         try {
             whisper = library.whisperSettings();
+            readingPrompt = library.setting("reading_prompt", LocalProcessing.READING_PROMPT);
             systemPrompt = library.noteSystemPrompt();
             noteTimeLimitMinutes = library.noteTimeLimitMinutes();
             profiles = library.profiles();
@@ -157,11 +163,23 @@ final class LectureDocuments {
         return panel;
     }
 
+    VBox readingPanel() {
+        reading.setEditable(false);
+        reading.setWrapText(true);
+        reading.setPromptText("Здесь появится полный текст лекции, разбитый на абзацы");
+        format.setOnAction(event -> startGeneration(true));
+        exportReading.setOnAction(event -> export("lecture.md", reading.getText()));
+        var panel = new VBox(8, reading, readingStatus, new HBox(8, format, exportReading));
+        panel.setPadding(new Insets(6, 10, 10, 10));
+        VBox.setVgrow(reading, Priority.ALWAYS);
+        return panel;
+    }
+
     VBox notePanel() {
         note.setWrapText(true);
         note.setPromptText("Напишите конспект в Markdown или сформируйте его по расшифровке");
         note.textProperty().addListener((obs, prior, text) -> updateButtons());
-        generate.setOnAction(event -> startGeneration());
+        generate.setOnAction(event -> startGeneration(false));
         save.setOnAction(event -> saveNote());
         exportNote.setOnAction(event -> export("note.md", note.getText()));
         playReference.setOnAction(event -> playReference());
@@ -190,6 +208,7 @@ final class LectureDocuments {
         loading = item != null;
         transcriptId = null;
         transcript.getItems().clear();
+        reading.clear();
         setNote(null);
         showStatus(item == null ? "" : "Открываем документы");
         updateButtons();
@@ -207,6 +226,7 @@ final class LectureDocuments {
                     transcript.getItems().setAll(saved.segments());
                     selectRequestedSegment();
                     setNote(saved.note());
+                    reading.setText(saved.readingText() == null ? "" : saved.readingText());
                     loading = false;
                     showStatus("");
                     updateButtons();
@@ -255,6 +275,7 @@ final class LectureDocuments {
             long version = library.editTranscriptSegment(id, expectedVersion, index, text);
             return () -> {
                 transcriptId = version;
+                reading.clear();
                 transcript.getItems().set(index,
                         new LocalProcessing.Segment(segment.start(), segment.end(), text,
                                 segment.speaker(), segment.speakerName()));
@@ -290,6 +311,7 @@ final class LectureDocuments {
             long version = library.saveTranscript(id, result);
             return () -> {
                 transcriptId = version;
+                reading.clear();
                 transcript.getItems().setAll(result);
                 selectRequestedSegment();
             };
@@ -338,6 +360,7 @@ final class LectureDocuments {
 
     private void showLabeledTranscript(long version, List<LocalProcessing.Segment> segments, int index) {
         transcriptId = version;
+        reading.clear();
         transcript.getItems().setAll(segments);
         if (index >= 0) {
             transcript.getSelectionModel().select(index);
@@ -345,8 +368,8 @@ final class LectureDocuments {
         }
     }
 
-    private void startGeneration() {
-        if (dirty()) {
+    private void startGeneration(boolean forReading) {
+        if (!forReading && dirty()) {
             DesktopDialogs.notice(owner, "Сохраните текущую редакцию перед генерацией.");
             return;
         }
@@ -361,19 +384,19 @@ final class LectureDocuments {
                 .ifPresent(profile::setValue);
         var focus = new TextField(selected.focus());
         var timeLimit = new TextField(Integer.toString(noteTimeLimitMinutes));
-        var prompt = new TextArea(systemPrompt);
+        var prompt = new TextArea(forReading ? readingPrompt : systemPrompt);
         prompt.setWrapText(true);
         prompt.setPrefColumnCount(56);
         prompt.setPrefRowCount(8);
         var settings = DesktopDialogs.fields();
         DesktopDialogs.field(settings, 0, "Профиль модели", profile);
-        DesktopDialogs.field(settings, 1, "Фокус", focus);
+        if (!forReading) DesktopDialogs.field(settings, 1, "Фокус", focus);
         DesktopDialogs.field(settings, 2, "Лимит времени, мин", timeLimit);
         DesktopDialogs.field(settings, 3, "Системный промпт", prompt);
-        var hint = new Label("Основной профиль и промпт задаются во вкладке «Настройки».");
+        var hint = new Label(forReading ? "Модель выбирает места для абзацев. Все слова сохраняются." : "Основной профиль и промпт задаются во вкладке «Настройки».");
         hint.getStyleClass().add("note-hint");
         settings.add(hint, 1, 4);
-        if (!DesktopDialogs.form(owner, "Сформировать конспект", settings)) return;
+        if (!DesktopDialogs.form(owner, forReading ? "Разбить текст на абзацы" : "Сформировать конспект", settings)) return;
         var chosen = profile.getValue();
         if (chosen == null) {
             DesktopDialogs.notice(owner, "Выберите профиль модели.");
@@ -382,12 +405,12 @@ final class LectureDocuments {
         if (chosen.cloud() && !DesktopDialogs.confirm(owner, "Отправка текста во внешний сервис",
                 "Профиль «" + chosen.name() + "» обращается к " + chosen.baseUrl() + ".\n"
                         + "Модель: " + chosen.modelId() + ".\n"
-                        + "Передаём тему, фокус и текст расшифровки (" + transcript.getItems().size()
+                        + (forReading ? "Передаём текст расшифровки (" : "Передаём тему, фокус и текст расшифровки (") + transcript.getItems().size()
                         + " реплик). Звук не передаётся.")) return;
         String requestedFocus = focus.getText().strip();
         String requestedPrompt = prompt.getText();
         if (requestedPrompt.isBlank()) {
-            DesktopDialogs.notice(owner, "Введите системный промпт для конспекта.");
+            DesktopDialogs.notice(owner, "Введите системный промпт.");
             return;
         }
         int minutes;
@@ -401,16 +424,30 @@ final class LectureDocuments {
         var item = selected;
         var source = List.copyOf(transcript.getItems());
         Long sourceId = transcriptId;
-        var llm = chosen.llm("");
         boolean needsKey = chosen.hasSecret();
         long profileId = chosen.id();
+        if (forReading) {
+            run("Разбиваем текст на абзацы", () -> {
+                String secret = needsKey ? InvitationSecret.unprotectText(library.profileSecret(profileId)) : "";
+                String text = LocalProcessing.formatReading(source, chosen.llm(secret), requestedPrompt,
+                        java.time.Duration.ofMinutes(minutes));
+                library.saveReadingText(item.id(), sourceId, text);
+                library.saveSetting("reading_prompt", requestedPrompt);
+                return () -> {
+                    readingPrompt = requestedPrompt;
+                    reading.setText(text);
+                    reading.positionCaret(0);
+                };
+            }, false);
+            return;
+        }
         systemPrompt = requestedPrompt;
         noteTimeLimitMinutes = minutes;
         run("Формируем конспект", () -> {
             String secret = needsKey ? InvitationSecret.unprotectText(library.profileSecret(profileId)) : "";
             library.saveNoteSettings(requestedPrompt, minutes);
             String markdown = LocalProcessing.generate(item.topic().isBlank() ? item.title() : item.topic(),
-                    source, llm, requestedFocus, requestedPrompt, java.time.Duration.ofMinutes(minutes));
+                    source, chosen.llm(secret), requestedFocus, requestedPrompt, java.time.Duration.ofMinutes(minutes));
             library.saveNote(item.id(), sourceId, markdown, true);
             return () -> setNote(new LectureLibrary.Note(sourceId, markdown));
         }, true);
@@ -533,6 +570,8 @@ final class LectureDocuments {
         renameSpeaker.setDisable(!available || transcriptId == null || line == null
                 || !SpeakerDiarization.canName(line.speaker()));
         exportTranscript.setDisable(!available || transcript.getItems().isEmpty());
+        format.setDisable(!available || transcript.getItems().isEmpty());
+        exportReading.setDisable(!available || reading.getText().isBlank());
         generate.setDisable(!available || transcript.getItems().isEmpty());
         save.setDisable(!available || !dirty());
         exportNote.setDisable(!available || note.getText().isBlank());
@@ -546,6 +585,9 @@ final class LectureDocuments {
         status.setText(value);
         noteStatus.setText(value);
         boolean visible = !value.isBlank();
+        readingStatus.setText(value);
+        readingStatus.setVisible(visible);
+        readingStatus.setManaged(visible);
         status.setVisible(visible);
         status.setManaged(visible);
         noteStatus.setVisible(visible);

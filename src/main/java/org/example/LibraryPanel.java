@@ -135,7 +135,8 @@ final class LibraryPanel extends VBox {
         recordingTab = new Tab("Запись", recordingPane);
         transcriptTab = new Tab("Расшифровка", documents.transcriptPanel());
         noteTab = new Tab("Конспект", documents.notePanel());
-        tabs.getTabs().addAll(recordingTab, transcriptTab, noteTab);
+        tabs.getTabs().addAll(recordingTab, transcriptTab, noteTab,
+                new Tab("Текст для чтения", documents.readingPanel()));
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
         var lecturePane = new BorderPane(tabs);
         player.setPadding(new Insets(10));

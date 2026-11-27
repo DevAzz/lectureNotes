@@ -54,7 +54,7 @@ final class LectureLibrary implements AutoCloseable {
     enum Sort { DATE, TITLE, RELEVANCE }
     record Filters(Long subjectId, Instant since, Instant before, Boolean hasNote, String state, Sort sort) { }
     record Hit(Lecture lecture, Kind kind, int ordinal, long startMillis, String excerpt) { }
-    record Documents(Long transcriptId, List<LocalProcessing.Segment> segments, Note note) { }
+    record Documents(Long transcriptId, List<LocalProcessing.Segment> segments, Note note, String readingText) { }
     record LiveSegment(long id, LocalProcessing.Segment segment) {
         @Override public String toString() { return segment.toString(); }
     }
@@ -118,8 +118,8 @@ final class LectureLibrary implements AutoCloseable {
             rows.next();
             version = rows.getInt(1);
         }
-        if (version == 6) return;
-        if (version < 0 || version > 6) throw new IOException("Библиотека создана более новой версией приложения.");
+        if (version == 7) return;
+        if (version < 0 || version > 7) throw new IOException("Библиотека создана более новой версией приложения.");
         transaction(() -> {
             try (var statement = db.createStatement()) {
                 if (version == 0) for (String sql : LibrarySchema.V1) statement.execute(sql);
@@ -128,8 +128,9 @@ final class LectureLibrary implements AutoCloseable {
                 if (version < 4) for (String sql : LibrarySchema.V4) statement.execute(sql);
                 if (version < 5) for (String sql : LibrarySchema.V5) statement.execute(sql);
                 if (version < 6) for (String sql : LibrarySchema.V6) statement.execute(sql);
+                if (version < 7) statement.execute("ALTER TABLE transcript ADD COLUMN reading_text TEXT");
                 if (version == 0) importPrototype();
-                statement.execute("PRAGMA user_version = 6");
+                statement.execute("PRAGMA user_version = 7");
             }
             if (version < 6) seedDefaultProfile();
             return null;
@@ -554,14 +555,24 @@ final class LectureLibrary implements AutoCloseable {
 
     synchronized Documents documents(String id) throws SQLException {
         try (var sql = prepare("""
-                SELECT l.current_transcript, n.markdown, n.transcript_id FROM lecture l
+                SELECT l.current_transcript, n.markdown, n.transcript_id, t.reading_text FROM lecture l
+                LEFT JOIN transcript t ON t.id=l.current_transcript
                 LEFT JOIN note_version n ON n.id=l.current_note WHERE l.id=?
                 """, id); var rows = sql.executeQuery()) {
-            if (!rows.next()) return new Documents(null, List.of(), null);
+            if (!rows.next()) return new Documents(null, List.of(), null, "");
             Long version = nullableLong(rows, 1);
             String note = rows.getString(2);
             var currentNote = note == null ? null : new Note(nullableLong(rows, 3), note);
-            return new Documents(version, segments(version), currentNote);
+            return new Documents(version, segments(version), currentNote, rows.getString(4));
+        }
+    }
+
+    synchronized void saveReadingText(String lecture, long version, String text) throws SQLException, IOException {
+        if (update("""
+                UPDATE transcript SET reading_text=? WHERE id=? AND id=(
+                    SELECT current_transcript FROM lecture WHERE id=?)
+                """, text, version, lecture) != 1) {
+            throw new IOException("Расшифровка изменилась. Откройте лекцию заново.");
         }
     }
 
