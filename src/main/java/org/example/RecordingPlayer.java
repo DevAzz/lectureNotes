@@ -123,6 +123,11 @@ final class RecordingPlayer extends VBox {
         time.setText(timestamp((long) position.getValue()) + " / " + timestamp((long) position.getMax()));
     }
 
+    /** Текущая позиция общей шкалы записи в миллисекундах или -1, если аудио нет. */
+    long currentTimeMillis() {
+        return chunks.isEmpty() ? -1 : (long) position.getValue();
+    }
+
     static String timestamp(long millis) {
         long seconds = millis / 1000;
         return "%02d:%02d:%02d".formatted(seconds / 3600, seconds / 60 % 60, seconds % 60);

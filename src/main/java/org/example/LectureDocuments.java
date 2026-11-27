@@ -42,6 +42,7 @@ final class LectureDocuments {
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ListView<LocalProcessing.Segment> transcript = new ListView<>();
     private final TextArea note = new TextArea();
+    private final MarkdownEditor noteEditor;
     private final Label status = new Label();
     private final Label noteStatus = new Label();
     private final Button recognize = new Button("Распознать");
@@ -82,6 +83,13 @@ final class LectureDocuments {
         Path executable = configuredPath("LECTURENOTES_WHISPER", bundled.executable());
         Path weights = configuredPath("LECTURENOTES_WHISPER_MODEL", bundled.model());
         whisper = new LocalProcessing.Whisper(executable, weights, executable.equals(bundled.executable()) && bundled.cpu());
+        noteEditor = new MarkdownEditor(note, player::currentTimeMillis);
+        noteEditor.setOnSeek(time -> {
+            if (selected != null && selected.hasAudio()) player.seek(time, true);
+        });
+        noteEditor.setSaveAction(() -> {
+            if (!save.isDisabled()) saveNote();
+        });
     }
 
     private static Path configuredPath(String variable, Path fallback) {
@@ -120,7 +128,7 @@ final class LectureDocuments {
 
     VBox notePanel() {
         note.setWrapText(true);
-        note.setPromptText("Напишите конспект или сформируйте его по расшифровке");
+        note.setPromptText("Напишите конспект в Markdown или сформируйте его по расшифровке");
         note.textProperty().addListener((obs, prior, text) -> updateButtons());
         generate.setOnAction(event -> startGeneration());
         save.setOnAction(event -> saveNote());
@@ -128,10 +136,10 @@ final class LectureDocuments {
         playReference.setOnAction(event -> playReference());
         revisions.setOnAction(event -> showRevisions());
         delete.setOnAction(event -> deleteNote());
-        var panel = new VBox(8, noteStatus, note, new HBox(8, generate, save, revisions, delete),
+        var panel = new VBox(8, noteStatus, noteEditor, new HBox(8, generate, save, revisions, delete),
                 new HBox(8, playReference, exportNote));
         panel.setPadding(new Insets(10));
-        VBox.setVgrow(note, Priority.ALWAYS);
+        VBox.setVgrow(noteEditor, Priority.ALWAYS);
         updateButtons();
         return panel;
     }
@@ -489,6 +497,8 @@ final class LectureDocuments {
     private void updateButtons() {
         boolean available = selected != null && !busy.get() && !loading;
         note.setEditable(available);
+        noteEditor.setDirty(dirty());
+        noteEditor.setTimecodeAvailable(available && selected != null && selected.hasAudio());
         recognize.setDisable(!available || !selected.hasAudio());
         whisperSettings.setDisable(busy.get());
         playLine.setDisable(!available || !selected.hasAudio() || transcript.getSelectionModel().isEmpty());

@@ -84,7 +84,10 @@ final class DesktopWindow {
         sections.getTabs().addAll(meetingTab, new Tab("Библиотека", libraryPanel));
         sections.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
         stage.setTitle("Конспекты лекций");
-        stage.setScene(new Scene(sections, 1080, 640));
+        var scene = new Scene(sections, 1080, 640);
+        var stylesheet = DesktopWindow.class.getResource("/app.css");
+        if (stylesheet != null) scene.getStylesheets().add(stylesheet.toExternalForm());
+        stage.setScene(scene);
         stage.setMinWidth(980);
         stage.setMinHeight(520);
         stage.setOnCloseRequest(event -> {

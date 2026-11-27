@@ -1,0 +1,135 @@
+/* Оформление окон приложения. Цвета подобраны под светлую тему Modena на Windows. */
+.root {
+    -fx-font-family: "Segoe UI";
+    -fx-font-size: 13px;
+    -fx-accent: #2f6feb;
+    -fx-focus-color: #2f6feb;
+    -fx-faint-focus-color: #2f6feb22;
+    -fx-selection-bar: #d7e6fb;
+    -fx-selection-bar-non-focused: #e9eff9;
+    -ink: #1c2430;
+    -ink-soft: #4d5a6b;
+    -ink-faint: #8a94a3;
+    -line: #dde3ec;
+    -surface: #f5f7fa;
+}
+
+.tab-pane > .tab-header-area > .tab-header-background { -fx-background-color: #eaeef5; }
+.tab-pane > .tab-content-area { -fx-background-color: #fbfcfe; }
+.tab-pane > .tab-header-area > .headers-region > .tab {
+    -fx-background-color: transparent;
+    -fx-background-radius: 7 7 0 0;
+    -fx-padding: 6 14 6 14;
+}
+.tab-pane > .tab-header-area > .headers-region > .tab:selected { -fx-background-color: white; }
+.tab .tab-label { -fx-text-fill: -ink-soft; }
+.tab:selected .tab-label { -fx-text-fill: #10233f; -fx-font-weight: 700; }
+.tab-pane > .tab-header-area > .headers-region > .tab:selected .focus-indicator { -fx-border-color: transparent; }
+
+.button {
+    -fx-background-color: #edf1f7;
+    -fx-background-radius: 7;
+    -fx-text-fill: -ink;
+    -fx-padding: 5 11 5 11;
+}
+.button:hover { -fx-background-color: #e0e8f3; }
+.button:pressed { -fx-background-color: #d3dfee; }
+.button:disabled { -fx-opacity: 0.45; }
+
+.text-area, .text-field, .combo-box, .date-picker, .list-view {
+    -fx-background-radius: 7;
+    -fx-border-color: -line;
+    -fx-border-radius: 7;
+}
+.text-area .content { -fx-background-color: white; }
+.list-view { -fx-border-radius: 7; }
+
+.split-pane > .split-pane-divider { -fx-background-color: #e6ebf2; -fx-padding: 0 3 0 3; }
+
+/* Редактор конспекта. */
+.note-editor { -fx-padding: 0; }
+.note-toolbar {
+    -fx-background-color: -surface;
+    -fx-background-radius: 8;
+    -fx-border-color: #e2e7ef;
+    -fx-border-radius: 8;
+    -fx-padding: 6 8 6 8;
+}
+.md-tool { -fx-font-size: 12px; -fx-padding: 4 9 4 9; }
+.md-mode { -fx-font-size: 12px; -fx-padding: 4 9 4 9; -fx-background-radius: 7; -fx-background-color: transparent; }
+.md-mode:selected { -fx-background-color: -fx-accent; -fx-text-fill: white; }
+.md-mode:hover { -fx-background-color: #e0e8f3; }
+.md-mode:selected:hover { -fx-background-color: -fx-accent; }
+.note-tool-separator { -fx-opacity: 0.45; }
+.note-source {
+    -fx-font-family: "Consolas";
+    -fx-font-size: 13px;
+    -fx-text-fill: -ink;
+    -fx-highlight-fill: #cfe2fb;
+    -fx-highlight-text-fill: #10233f;
+    -fx-background-color: white;
+    -fx-background-radius: 8;
+    -fx-border-color: -line;
+    -fx-border-radius: 8;
+}
+.note-footer { -fx-padding: 0 4 0 2; }
+.note-status { -fx-text-fill: -ink-soft; -fx-font-size: 12px; }
+.note-status-dirty { -fx-text-fill: #a1560c; -fx-font-weight: 700; }
+.note-hint { -fx-text-fill: -ink-faint; -fx-font-size: 11.5px; }
+
+/* Просмотр Markdown. */
+.md-view {
+    -fx-background-color: white;
+    -fx-background: white;
+    -fx-border-color: -line;
+    -fx-border-radius: 8;
+    -fx-background-radius: 8;
+}
+.md-view > .viewport { -fx-background-color: transparent; }
+.md-body { -fx-background-color: transparent; }
+.md-empty { -fx-text-fill: -ink-faint; }
+.md-text { -fx-fill: -ink; -fx-font-size: 13.5px; }
+.md-h1 { -fx-fill: #0f1c2e; -fx-font-size: 23px; -fx-font-weight: 700; }
+.md-h2 { -fx-fill: #0f1c2e; -fx-font-size: 19px; -fx-font-weight: 700; }
+.md-h3 { -fx-fill: #14263c; -fx-font-size: 16.5px; -fx-font-weight: 700; }
+.md-h4 { -fx-fill: #14263c; -fx-font-size: 14.5px; -fx-font-weight: 700; }
+.md-h5 { -fx-fill: #14263c; -fx-font-size: 13.5px; -fx-font-weight: 700; }
+.md-h6 { -fx-fill: -ink-soft; -fx-font-size: 12.5px; -fx-font-weight: 700; }
+.md-strong { -fx-font-weight: 700; }
+.md-em { -fx-font-style: italic; }
+.md-del { -fx-strikethrough: true; -fx-fill: -ink-soft; }
+.md-code { -fx-fill: #9d2f4f; -fx-font-family: "Consolas"; -fx-font-size: 12.5px; }
+.md-link { -fx-fill: #1a5fd0; }
+.md-anchor { -fx-fill: -ink; }
+.md-time { -fx-fill: #0f6b56; -fx-font-weight: 700; }
+.md-image { -fx-fill: -ink-soft; -fx-font-style: italic; }
+.md-rule { -fx-background-color: -line; -fx-min-height: 1; -fx-pref-height: 1; -fx-max-height: 1; }
+.md-quote {
+    -fx-background-color: #f3f7fd;
+    -fx-border-color: #2f6feb;
+    -fx-border-width: 0 0 0 3;
+    -fx-background-radius: 0 7 7 0;
+    -fx-border-radius: 0 7 7 0;
+    -fx-padding: 8 12 8 14;
+}
+.md-quote .md-text { -fx-fill: #3d4a5c; }
+.md-quote .md-h1, .md-quote .md-h2, .md-quote .md-h3 { -fx-fill: #123a63; }
+.md-code-block {
+    -fx-background-color: #f6f7f9;
+    -fx-border-color: #e2e6ec;
+    -fx-background-radius: 7;
+    -fx-border-radius: 7;
+    -fx-padding: 10 12 10 12;
+}
+.md-code-text { -fx-fill: #23303f; -fx-font-family: "Consolas"; -fx-font-size: 12.5px; }
+.md-code-lang { -fx-fill: -ink-faint; -fx-font-size: 11px; }
+.md-table { -fx-grid-lines-visible: true; -fx-border-color: -line; -fx-background-color: white; }
+.md-table-wrap { -fx-padding: 0; }
+.md-cell { -fx-padding: 6 9 6 9; }
+.md-th { -fx-background-color: #f1f4f9; }
+.md-th .md-text { -fx-font-weight: 700; }
+.md-list { -fx-padding: 0 0 0 2; }
+.md-item { -fx-padding: 1 0 1 0; }
+.md-marker { -fx-min-width: 24; }
+.md-bullet, .md-number, .md-task { -fx-fill: #2f6feb; -fx-font-weight: 700; }
+.md-task-done { -fx-fill: #0f6b56; }
