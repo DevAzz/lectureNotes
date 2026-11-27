@@ -362,7 +362,7 @@ final class SettingsPanel extends VBox {
                             ? "Файлы движка на месте: " + whisper.model().getFileName()
                             : "Файлы движка или модели не найдены — распознавание недоступно.");
                     libraryStatus.setText("Папка библиотеки: " + data + "\n"
-                            + stats.subjects() + " предметов · " + stats.lectures() + " лекций · "
+                            + "Коллекций: " + stats.subjects() + " · записей: " + stats.lectures() + " · "
                             + stats.transcripts() + " с расшифровкой · " + stats.notes() + " с конспектом"
                             + (stats.pendingCleanup() > 0
                                     ? "\nВ очереди очистки файлов: " + stats.pendingCleanup() : ""));

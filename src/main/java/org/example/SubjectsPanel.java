@@ -30,7 +30,7 @@ import java.util.concurrent.Executors;
 import java.util.function.Consumer;
 
 /**
- * Вкладка «Предметы»: поиск, создание, правка, перенос лекций и удаление предметов.
+ * Управление коллекциями и перенос записей между ними.
  * Все обращения к SQLite выполняются вне потока JavaFX.
  */
 final class SubjectsPanel extends VBox {
@@ -38,7 +38,7 @@ final class SubjectsPanel extends VBox {
             .withZone(ZoneId.systemDefault());
 
     private enum Order {
-        NAME("По названию"), POPULAR("Сначала больше лекций");
+        NAME("По названию"), POPULAR("По числу записей");
 
         private final String label;
 
@@ -62,13 +62,13 @@ final class SubjectsPanel extends VBox {
     private final Label statistics = new Label();
     private final Label details = new Label();
     private final Label status = new Label();
-    private final Button create = new Button("Создать предмет");
+    private final Button create = new Button("Создать коллекцию");
     private final MenuItem edit = new MenuItem("Изменить");
     private final MenuItem remove = new MenuItem("Удалить");
-    private final MenuItem moveAll = new MenuItem("Перенести все лекции");
-    private final MenuItem moveOne = new MenuItem("Перенести выбранную лекцию");
+    private final MenuItem moveAll = new MenuItem("Перенести все записи");
+    private final MenuItem moveOne = new MenuItem("Перенести выбранную запись");
     private final Button openSubject = new Button("В библиотеку");
-    private final Button openLecture = new Button("Открыть лекцию");
+    private final Button openLecture = new Button("Открыть запись");
 
     private List<LectureLibrary.Subject> all = List.of();
     private LectureLibrary.Subject shown;
@@ -87,16 +87,16 @@ final class SubjectsPanel extends VBox {
         setPadding(new Insets(14));
 
         search.setId("subject-search");
-        search.setPromptText("Поиск по названию и описанию предмета");
-        search.setAccessibleText("Поиск по названию и описанию предмета");
+        search.setPromptText("Поиск по названию и описанию коллекции");
+        search.setAccessibleText("Поиск по названию и описанию коллекции");
         HBox.setHgrow(search, Priority.ALWAYS);
         order.setId("subject-order");
         order.getItems().setAll(Order.values());
         order.getSelectionModel().selectFirst();
-        order.setTooltip(new Tooltip("Порядок списка предметов"));
+        order.setTooltip(new Tooltip("Сортировка коллекций"));
 
         subjects.setId("subject-list");
-        subjects.setPlaceholder(new Label("Предметов пока нет"));
+        subjects.setPlaceholder(new Label("Коллекций пока нет"));
         subjects.setCellFactory(source -> new ListCell<>() {
             { setWrapText(true); }
 
@@ -113,7 +113,7 @@ final class SubjectsPanel extends VBox {
         order.setOnAction(event -> applyFilter());
 
         lectures.setId("subject-lectures");
-        lectures.setPlaceholder(new Label("В этом предмете ещё нет лекций"));
+        lectures.setPlaceholder(new Label("В этой коллекции ещё нет записей"));
         lectures.setCellFactory(source -> new ListCell<>() {
             {
                 setWrapText(true);
@@ -136,7 +136,7 @@ final class SubjectsPanel extends VBox {
         lectures.getSelectionModel().selectedItemProperty().addListener((obs, prior, value) -> updateButtons());
 
         details.setWrapText(true);
-        heading.setText("Выберите предмет");
+        heading.setText("Выберите коллекцию");
         status.setWrapText(true);
 
         create.setOnAction(event -> editSubject(null));
@@ -164,9 +164,9 @@ final class SubjectsPanel extends VBox {
         heading.setWrapText(true);
         details.managedProperty().bind(details.textProperty().isNotEmpty());
         details.visibleProperty().bind(details.managedProperty());
-        var listPane = new VBox(8, new Label("Предметы"), search, order, subjects, create);
+        var listPane = new VBox(8, new Label("Коллекции"), search, order, subjects, create);
         var right = new VBox(8, heading, details, statistics, new HBox(8, openSubject, actions),
-                new Label("Лекции предмета"), lectures, new HBox(8, openLecture, transfer));
+                new Label("Записи коллекции"), lectures, new HBox(8, openLecture, transfer));
         listPane.getStyleClass().add("subject-pane");
         right.getStyleClass().add("subject-pane");
         VBox.setVgrow(subjects, Priority.ALWAYS);
@@ -182,7 +182,7 @@ final class SubjectsPanel extends VBox {
         refresh();
     }
 
-    /** Перечитывает предметы и их счётчики после изменений в библиотеке. */
+    /** Перечитывает коллекции и их счётчики после изменений в библиотеке. */
     void refresh() {
         if (closed) return;
         worker.execute(() -> {
@@ -193,7 +193,7 @@ final class SubjectsPanel extends VBox {
                 });
             } catch (Exception error) {
                 Platform.runLater(() -> {
-                    if (!closed) say("Не удалось загрузить предметы.");
+                    if (!closed) say("Не удалось загрузить коллекции.");
                 });
             }
         });
@@ -205,11 +205,12 @@ final class SubjectsPanel extends VBox {
     }
 
     private static String card(LectureLibrary.Subject item) {
-        return item.name() + " · " + item.lectures() + " лекц.";
+        return item.name() + " · записей: " + item.lectures();
     }
 
     private static String counts(LectureLibrary.Subject item) {
-        return item.lectures() + " лекц. · " + item.transcripts() + " с расшифровкой · " + item.notes() + " с конспектом";
+        return "Записей: " + item.lectures() + " · с расшифровкой: " + item.transcripts()
+                + " · с конспектом: " + item.notes();
     }
 
     private static String state(LectureLibrary.Lecture item) {
@@ -231,7 +232,7 @@ final class SubjectsPanel extends VBox {
         updateButtons();
     }
 
-    /** Поиск и сортировка работают уже на загруженном списке — предметов у пользователя десятки. */
+    /** Поиск и сортировка работают с уже загруженным списком коллекций. */
     private void applyFilter() {
         if (closed) return;
         String key = RussianSearch.normalize(search.getText());
@@ -257,7 +258,7 @@ final class SubjectsPanel extends VBox {
         else {
             shown = null;
             showSubject(null);
-            if (search.getText().isBlank()) subjects.setPlaceholder(new Label("Предметов пока нет"));
+            if (search.getText().isBlank()) subjects.setPlaceholder(new Label("Коллекций пока нет"));
             else {
                 var clear = new Button("Сбросить поиск");
                 clear.setOnAction(event -> search.clear());
@@ -265,7 +266,7 @@ final class SubjectsPanel extends VBox {
             }
             lectures.getItems().clear();
         }
-        say(visible.size() == all.size() ? "" : "Предметов найдено: " + visible.size());
+        say(visible.size() == all.size() ? "" : "Найдено коллекций: " + visible.size());
         updateButtons();
     }
 
@@ -273,7 +274,7 @@ final class SubjectsPanel extends VBox {
         shown = item;
         lectures.getItems().clear();
         if (item == null) {
-            heading.setText("Выберите предмет");
+            heading.setText("Выберите коллекцию");
             details.setText("");
             statistics.setText("");
             return;
@@ -292,7 +293,7 @@ final class SubjectsPanel extends VBox {
                 });
             } catch (Exception error) {
                 Platform.runLater(() -> {
-                    if (!closed && shown != null && shown.id() == id) say("Не удалось загрузить лекции предмета.");
+                    if (!closed && shown != null && shown.id() == id) say("Не удалось загрузить записи коллекции.");
                 });
             }
         });
@@ -301,30 +302,30 @@ final class SubjectsPanel extends VBox {
     private void editSubject(LectureLibrary.Subject item) {
         var name = new TextField(item == null ? "" : item.name());
         var description = new TextField(item == null ? "" : item.description());
-        name.setPromptText("Например: Математический анализ");
+        name.setPromptText("Например, рабочие встречи");
         var form = DesktopDialogs.fields();
         DesktopDialogs.field(form, 0, "Название", name);
         DesktopDialogs.field(form, 1, "Описание", description);
-        if (!DesktopDialogs.form(owner, item == null ? "Новый предмет" : "Изменить предмет", form)) return;
+        if (!DesktopDialogs.form(owner, item == null ? "Новая коллекция" : "Изменить коллекцию", form)) return;
         String title = name.getText();
         String details = description.getText();
         mutate(() -> library.saveSubject(item == null ? null : item.id(), title, details), this::refresh);
     }
 
-    /** Удаление возможно только для предмета без лекций, поэтому сразу предлагаем перенос. */
+    /** Перед удалением непустой коллекции предлагаем перенести её записи. */
     private void removeSubject() {
         var item = shown;
         if (item == null) return;
         if (item.lectures() == 0) {
-            if (!DesktopDialogs.confirm(owner, "Удаление предмета",
-                    "Удалить предмет «" + item.name() + "»? Лекций в нём нет.")) return;
+            if (!DesktopDialogs.confirm(owner, "Удаление коллекции",
+                    "Удалить пустую коллекцию «" + item.name() + "»?")) return;
             mutate(() -> library.deleteSubject(item.id()), this::refresh);
             return;
         }
-        var target = otherSubject("В какой предмет перенести " + item.lectures() + " лекций?");
+        var target = otherSubject("В какую коллекцию перенести записи?");
         if (target == null) return;
-        if (!DesktopDialogs.confirm(owner, "Перенос и удаление", "Перенести лекции предмета «" + item.name()
-                + "» в «" + target.name() + "» и удалить пустой предмет?")) return;
+        if (!DesktopDialogs.confirm(owner, "Перенос и удаление", "Перенести все записи из «" + item.name()
+                + "» в «" + target.name() + "» и удалить исходную коллекцию?")) return;
         long to = target.id();
         mutate(() -> {
             library.moveSubjectLectures(item.id(), to);
@@ -335,10 +336,10 @@ final class SubjectsPanel extends VBox {
     private void moveAllLectures() {
         var item = shown;
         if (item == null || item.lectures() == 0) return;
-        var target = otherSubject("В какой предмет перенести все лекции?");
+        var target = otherSubject("В какую коллекцию перенести все записи?");
         if (target == null) return;
-        if (!DesktopDialogs.confirm(owner, "Перенос лекций", "Перенести " + item.lectures() + " лекций из «"
-                + item.name() + "» в «" + target.name() + "»?")) return;
+        if (!DesktopDialogs.confirm(owner, "Перенос записей", "Перенести все записи из «" + item.name()
+                + "» в «" + target.name() + "»?")) return;
         long to = target.id();
         mutate(() -> library.moveSubjectLectures(item.id(), to), this::refresh);
     }
@@ -346,22 +347,22 @@ final class SubjectsPanel extends VBox {
     private void moveOneLecture() {
         var lecture = lectures.getSelectionModel().getSelectedItem();
         if (lecture == null || lecture.capturing()) return;
-        var target = chooseSubject("В какой предмет перенести «" + lecture.title() + "»?");
+        var target = chooseSubject("В какую коллекцию перенести «" + lecture.title() + "»?");
         if (target == null || target.id() == lecture.subjectId()) return;
         long to = target.id();
         String title = lecture.title();
         mutate(() -> library.moveLecture(lecture.id(), to), () -> {
             showSubject(shown);
             libraryChanged.run();
-            say("Лекция «" + title + "» перенесена.");
+            say("Запись «" + title + "» перенесена.");
         });
     }
 
-    /** Диалог выбора другого предмета; возвращает null, если выбирать не из чего или пользователь отменил. */
+    /** Предлагает выбрать коллекцию для переноса. */
     private LectureLibrary.Subject otherSubject(String question) {
         var others = all.stream().filter(item -> shown == null || item.id() != shown.id()).toList();
         if (others.isEmpty()) {
-            DesktopDialogs.notice(owner, "Нужен хотя бы один другой предмет — создайте его.");
+            DesktopDialogs.notice(owner, "Сначала создайте ещё одну коллекцию.");
             return null;
         }
         return chooseFrom(others, question);
@@ -378,7 +379,7 @@ final class SubjectsPanel extends VBox {
         box.getSelectionModel().selectFirst();
         var form = DesktopDialogs.fields();
         DesktopDialogs.field(form, 0, question, box);
-        if (!DesktopDialogs.form(owner, "Перенос лекций", form)) return null;
+        if (!DesktopDialogs.form(owner, "Перенос записей", form)) return null;
         return box.getValue();
     }
 
@@ -404,7 +405,7 @@ final class SubjectsPanel extends VBox {
                     writing = false;
                     updateButtons();
                     say(error instanceof IOException && error.getMessage() != null ? error.getMessage()
-                            : "Не удалось изменить предметы.");
+                            : "Не удалось изменить коллекции.");
                 });
             }
         });

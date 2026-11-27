@@ -65,15 +65,15 @@ final class LibraryPanel extends VBox {
     private final ComboBox<Choice<LectureLibrary.Sort>> order = new ComboBox<>();
     private final ListView<LectureLibrary.Hit> results = new ListView<>();
     private final Label resultStatus = new Label();
-    private final Label summary = new Label("Выберите лекцию");
+    private final Label summary = new Label("Выберите запись");
     private final TextArea gaps = new TextArea();
     private final ListView<LectureLibrary.LiveSegment> liveDraft = new ListView<>();
     private final Button editDraftLine = new Button("Изменить реплику");
     private final Button removeAudio = new Button("Удалить WAV");
-    private final Button connect = new Button("Открыть для встречи");
+    private final Button connect = new Button("Открыть для записи");
     private final Button edit = new Button("Изменить карточку");
-    private final Button delete = new Button("Удалить лекцию");
-    private final Button subjectsButton = new Button("Предметы");
+    private final Button delete = new Button("Удалить запись");
+    private final Button subjectsButton = new Button("Коллекции");
     private final Runnable openSubjects;
     private final RecordingPlayer player;
     private final LectureDocuments documents;
@@ -149,8 +149,8 @@ final class LibraryPanel extends VBox {
         VBox.setVgrow(split, Priority.ALWAYS);
 
         setPadding(new Insets(14));
-        query.setPromptText("Поиск по лекциям, репликам и конспектам");
-        query.setAccessibleText("Поиск по лекциям, репликам и конспектам");
+        query.setPromptText("Поиск по записям, репликам и конспектам");
+        query.setAccessibleText("Поиск по записям, репликам и конспектам");
         HBox.setHgrow(query, Priority.ALWAYS);
         configureFilters();
         since.setPromptText("С даты");
@@ -163,7 +163,7 @@ final class LibraryPanel extends VBox {
         until.setEditable(false);
         var reset = new Button("Сбросить фильтры");
         reset.setOnAction(event -> resetFilters());
-        reset.setTooltip(new Tooltip("Очистить поиск, предмет, период, конспект и состояние"));
+        reset.setTooltip(new Tooltip("Очистить поиск и все фильтры"));
         reset.disableProperty().bind(Bindings.createBooleanBinding(this::filtersEmpty,
                 query.textProperty(), subject.valueProperty(), since.valueProperty(), until.valueProperty(),
                 note.valueProperty(), state.valueProperty()));
@@ -180,7 +180,7 @@ final class LibraryPanel extends VBox {
         filters.managedProperty().bind(filters.visibleProperty());
         getChildren().addAll(searchRow, filters, split, new HBox(8, connect, edit, delete, resultStatus));
 
-        results.setPlaceholder(new Label("Лекции не найдены"));
+        results.setPlaceholder(new Label("Записи не найдены"));
         results.setOnKeyPressed(event -> {
             if (event.getCode() == KeyCode.ENTER) revealResult(results.getSelectionModel().getSelectedItem());
         });
@@ -228,7 +228,7 @@ final class LibraryPanel extends VBox {
     }
 
     private void configureFilters() {
-        subject.getItems().add(new Choice<>("Все предметы", null));
+        subject.getItems().add(new Choice<>("Все коллекции", null));
         note.getItems().setAll(List.of(new Choice<>("Любой конспект", null), new Choice<>("Есть конспект", true),
                 new Choice<>("Без конспекта", false)));
         state.getItems().setAll(List.of(new Choice<>("Все состояния", null), new Choice<>("Черновик", "DRAFT"),
@@ -344,7 +344,7 @@ final class LibraryPanel extends VBox {
         return box.getValue() == null ? null : box.getValue().value();
     }
 
-    /** Переключает библиотеку на лекции выбранного предмета. */
+    /** Переключает библиотеку на записи выбранной коллекции. */
     boolean openSubjectLecture(LectureLibrary.Lecture item) {
         if (shown != null && !shown.id().equals(item.id()) && !documents.canLeaveSelection()) return false;
         clearFilterValues();
@@ -375,7 +375,7 @@ final class LibraryPanel extends VBox {
         subjects = current;
         Long selected = value(subject);
         applying = true;
-        subject.getItems().setAll(List.of(new Choice<>("Все предметы", null)));
+        subject.getItems().setAll(List.of(new Choice<>("Все коллекции", null)));
         for (var item : subjects) subject.getItems().add(new Choice<>(item.name(), item.id()));
         var choice = subject.getItems().stream().filter(item -> Objects.equals(item.value(), selected)).findFirst()
                 .orElse(subject.getItems().getFirst());
@@ -445,7 +445,7 @@ final class LibraryPanel extends VBox {
         shown = item;
         documents.select(item, 0);
         updateButtons();
-        summary.setText(item == null ? "Выберите лекцию" : item.title() + " · " + (item.audioRemoved() ? "WAV удалены" : switch (item.state()) {
+        summary.setText(item == null ? "Выберите запись" : item.title() + " · " + (item.audioRemoved() ? "WAV удалены" : switch (item.state()) {
             case "COMPLETE" -> "Запись готова";
             case "PARTIAL" -> "Частичная запись";
             case "EMPTY" -> "Аудио не получено";
@@ -529,7 +529,7 @@ final class LibraryPanel extends VBox {
     private void removeOriginalAudio() {
         var item = shown;
         if (item == null || !item.hasAudio()) return;
-        if (!DesktopDialogs.confirm(owner, "Удаление WAV", "Удалить WAV лекции «" + item.title() + "»?\n"
+        if (!DesktopDialogs.confirm(owner, "Удаление WAV", "Удалить WAV записи «" + item.title() + "»?\n"
                 + "Карточка, черновик, расшифровка и конспект останутся в библиотеке.")) return;
         player.close();
         var removed = new AtomicBoolean();
@@ -548,7 +548,7 @@ final class LibraryPanel extends VBox {
         section.getItems().setAll(subjects);
         subjects.stream().filter(value -> value.id() == item.subjectId()).findFirst().ifPresent(section::setValue);
         var form = DesktopDialogs.fields();
-        DesktopDialogs.field(form, 0, "Предмет", section);
+        DesktopDialogs.field(form, 0, "Коллекция", section);
         DesktopDialogs.field(form, 1, "Название", name);
         DesktopDialogs.field(form, 2, "Тема", topic);
         DesktopDialogs.field(form, 3, "Фокус конспекта", focus);
@@ -569,7 +569,7 @@ final class LibraryPanel extends VBox {
             default -> "карточка, аудио, версии расшифровки и файлы обработки";
         };
         if (item.hasNote()) data += ", конспект и его редакции";
-        if (!DesktopDialogs.confirm(owner, "Удаление лекции", "Будут удалены данные лекции «" + item.title() + "»\n" + data)) return;
+        if (!DesktopDialogs.confirm(owner, "Удаление записи", "Будут удалены данные записи «" + item.title() + "»\n" + data)) return;
         player.close();
         mutate(() -> library.deleteLecture(item.id()), () -> {
             onLectureDeleted.accept(item.id());

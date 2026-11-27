@@ -89,7 +89,7 @@ final class LectureDocuments {
         this.onPublished = onPublished;
         try {
             whisper = library.whisperSettings();
-            readingPrompt = library.setting("reading_prompt", LocalProcessing.READING_PROMPT);
+            readingPrompt = library.readingPrompt();
             systemPrompt = library.noteSystemPrompt();
             noteTimeLimitMinutes = library.noteTimeLimitMinutes();
             profiles = library.profiles();
@@ -150,7 +150,7 @@ final class LectureDocuments {
         editLine.setOnAction(event -> editSegment());
         diarize.setText("Разметить спикеров");
         diarize.setOnAction(event -> startDiarization(false));
-        var singleSpeaker = new MenuItem("Один спикер на всю лекцию");
+        var singleSpeaker = new MenuItem("Один спикер на всю запись");
         singleSpeaker.setOnAction(event -> startDiarization(true));
         diarize.getItems().setAll(singleSpeaker);
         renameSpeaker.setOnAction(event -> renameSpeaker());
@@ -171,9 +171,9 @@ final class LectureDocuments {
     VBox readingPanel() {
         reading.setEditable(false);
         reading.setWrapText(true);
-        reading.setPromptText("Здесь появится полный текст лекции, разбитый на абзацы");
+        reading.setPromptText("Здесь появится полный текст записи, разбитый на абзацы");
         format.setOnAction(event -> startGeneration(true));
-        exportReading.setOnAction(event -> export("lecture.md", reading.getText()));
+        exportReading.setOnAction(event -> export("recording.md", reading.getText()));
         var panel = new VBox(8, reading, readingStatus, new HBox(8, format, exportReading));
         panel.setPadding(new Insets(6, 10, 10, 10));
         VBox.setVgrow(reading, Priority.ALWAYS);
@@ -240,7 +240,7 @@ final class LectureDocuments {
                 });
             } catch (Exception error) {
                 Platform.runLater(() -> {
-                    if (!closed && request == selection) showStatus("Не удалось открыть документы лекции.");
+                    if (!closed && request == selection) showStatus("Не удалось открыть документы записи.");
                 });
             }
         });

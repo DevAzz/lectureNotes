@@ -6,6 +6,8 @@ import javafx.scene.control.Alert;
 import java.nio.file.Path;
 
 public class Main {
+    static final String APP_TITLE = "Записи и конспекты";
+
     public static void main(String[] args) throws Exception {
         if (args.length == 1 && args[0].equals("--check")) {
             System.out.println("JDK " + Runtime.version().feature() + ", audio helper: " + Capture.helper());
@@ -52,7 +54,7 @@ public class Main {
 
     private static void showError(String message, LibraryLocation location) {
         var alert = new Alert(Alert.AlertType.ERROR, message);
-        alert.setTitle("Конспекты лекций");
+        alert.setTitle(APP_TITLE);
         alert.setHeaderText(null);
         AppTheme.load(location.defaultDirectory()).applyTo(alert.getDialogPane().getStylesheets());
         alert.showAndWait();

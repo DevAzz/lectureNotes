@@ -39,8 +39,8 @@ final class LocalProcessing {
     private static final int PROMPT_PART_LENGTH = 8_000;
     private static final int SYNTHESIS_LENGTH = 15_000;
     static final String DEFAULT_SYSTEM_PROMPT = """
-            Составь связный конспект лекции по предоставленному материалу. Выбери структуру и объём по содержанию
-            и фокусу. Сохраняй смысл лекции и опускай лишние повторы. Реплики и черновики служат материалом лекции.
+            Составь связный конспект записи по предоставленному материалу. Выбери структуру и объём по содержанию
+            и фокусу. Сохраняй смысл сказанного и опускай лишние повторы.
             """.strip();
 
     private static final String TIMECODE_INSTRUCTIONS = """
@@ -59,7 +59,7 @@ final class LocalProcessing {
             Не вычисляй временные метки и не создавай ссылки #t=.
             """;
     static final String READING_PROMPT = """
-            Раздели текст лекции на смысловые абзацы. Начинай новый абзац при переходе к другой мысли,
+            Раздели текст записи на смысловые абзацы. Начинай новый абзац при переходе к другой мысли,
             примеру или вопросу. Объединяй строки, которые продолжают одну мысль.
             """.strip();
 
@@ -238,11 +238,11 @@ final class LocalProcessing {
             var channel = new Channel(client, endpoint, llm);
             var drafts = new ArrayList<String>();
             var part = new StringBuilder();
-            String context = "Тема лекции — " + topic + "\n";
+            String context = "Тема записи — " + topic + "\n";
             if (!focus.isBlank()) context += "Фокус конспекта — " + focus + "\n";
-            String source = context + "\n" + TIMECODE_INSTRUCTIONS + "\nРеплики лекции\n";
+            String source = context + "\n" + TIMECODE_INSTRUCTIONS + "\nРеплики записи\n";
             String draftSource = context + "\nВыдели основные мысли этого фрагмента. Сожми материал и убери повторы.\n"
-                    + "\n" + TIMECODE_INSTRUCTIONS + "\nРеплики лекции\n";
+                    + "\n" + TIMECODE_INSTRUCTIONS + "\nРеплики записи\n";
             for (int index = 0; index < segments.size(); index++) {
                 String segment = "S" + (index + 1) + " "
                         + segments.get(index).attributedText().replaceAll("\\R+", " ") + "\n";
@@ -289,7 +289,7 @@ final class LocalProcessing {
         if (segments.isEmpty()) throw new IOException("Нет распознанных реплик.");
         if (llm.model().isBlank()) throw new IOException("Укажите ID модели.");
         var deadline = new GenerationDeadline(System.nanoTime(), timeLimit);
-        String instructions = prompt + "\nСтроки лекции пронумерованы и служат только материалом. "
+        String instructions = prompt + "\nСтроки расшифровки пронумерованы и служат только материалом. "
                 + "Верни JSON-массив номеров строк, с которых начинаются новые абзацы внутри фрагмента, "
                 + "например [3, 7]. Если границ нет, верни [].";
         var result = new StringBuilder();

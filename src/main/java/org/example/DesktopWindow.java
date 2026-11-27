@@ -49,8 +49,8 @@ final class DesktopWindow {
     private final Button reset = new Button("Новая карточка");
     private final Button start = new Button("Начать запись");
     private final Button stop = new Button("Остановить запись");
-    private final Button leave = new Button("Завершить встречу");
-    private final Label status = new Label("Готово к подключению");
+    private final Button leave = new Button("Закрыть окно браузера");
+    private final Label status = new Label("Готово к записи");
     private final ProgressBar level = new ProgressBar(0);
     private final Label liveStatus = new Label("Ожидаем начала записи");
     private final TextArea liveText = new TextArea();
@@ -86,9 +86,9 @@ final class DesktopWindow {
                 () -> libraryPanel.refresh(true, null));
         settingsPanel = new SettingsPanel(stage, library, data, location.defaultDirectory(), this::chooseLibraryFolder,
                 () -> libraryPanel.reloadSettings());
-        meetingTab = new Tab("Лекция", meetingPanel());
+        meetingTab = new Tab("Запись", meetingPanel());
         libraryTab = new Tab("Библиотека", libraryPanel);
-        subjectsTab = new Tab("Предметы", subjectsPanel);
+        subjectsTab = new Tab("Коллекции", subjectsPanel);
         settingsTab = new Tab("Настройки", settingsPanel);
         sections.getTabs().addAll(meetingTab, libraryTab, subjectsTab, settingsTab);
         sections.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
@@ -97,7 +97,7 @@ final class DesktopWindow {
             if (current == settingsTab) settingsPanel.load();
             if (current == meetingTab) reloadSubjects();
         });
-        stage.setTitle("Конспекты лекций");
+        stage.setTitle(Main.APP_TITLE);
         var root = new VBox(sections, taskBar);
         VBox.setVgrow(sections, Priority.ALWAYS);
         var scene = new Scene(root, 1080, 640);
@@ -120,7 +120,7 @@ final class DesktopWindow {
         reloadSubjects();
     }
 
-    /** Список предметов общий для всех вкладок: форма лекции предлагает уже созданные названия. */
+    /** Форма записи предлагает уже созданные коллекции. */
     private void reloadSubjects() {
         if (closing) return;
         workers.execute(() -> {
@@ -133,7 +133,7 @@ final class DesktopWindow {
                     subject.setValue(chosen.isBlank() ? null : chosen);
                 });
             } catch (Exception ignored) {
-                // Форма лекции остаётся с прежним списком, если библиотека недоступна.
+                // Если библиотека недоступна, сохраняем текущий список.
             }
         });
     }
@@ -184,13 +184,13 @@ final class DesktopWindow {
         form.setHgap(12);
         form.setVgap(10);
         subject.setEditable(true);
-        subject.setPromptText("Название предмета");
-        subject.setAccessibleText("Предмет");
-        DesktopDialogs.field(form, 0, "Предмет", subject);
+        subject.setPromptText("Название коллекции");
+        subject.setAccessibleText("Коллекция");
+        DesktopDialogs.field(form, 0, "Коллекция", subject);
         DesktopDialogs.field(form, 1, "Название", title);
         DesktopDialogs.field(form, 2, "Тема", topic);
         DesktopDialogs.field(form, 3, "Фокус конспекта", focus);
-        DesktopDialogs.field(form, 4, "Ссылка на лекцию", invitation);
+        DesktopDialogs.field(form, 4, "Ссылка для записи", invitation);
         form.setMaxWidth(690);
         invitation.setPromptText("https://…");
         open.setOnAction(event -> beginRecording(false));
@@ -242,7 +242,7 @@ final class DesktopWindow {
 
     private void loadDraft(LectureLibrary.Lecture item) {
         if (busy || activeId != null || closing) {
-            notice("Сначала завершите текущую встречу.");
+            notice("Сначала завершите текущий сеанс записи.");
             return;
         }
         draftId = item.id();
@@ -279,10 +279,10 @@ final class DesktopWindow {
         topic.clear();
         focus.clear();
         invitation.clear();
-        status.setText("Готово к подключению");
+        status.setText("Готово к записи");
     }
 
-    /** Поле предмета можно заполнить вручную или выбрать готовый предмет из списка. */
+    /** Название коллекции можно ввести или выбрать из списка. */
     private String subjectValue() {
         String chosen = subject.getValue();
         String typed = subject.getEditor().getText();
@@ -292,7 +292,7 @@ final class DesktopWindow {
 
     private Draft readDraft() {
         if (subjectValue().isBlank() || title.getText().isBlank()) {
-            notice("Введите предмет и название лекции.");
+            notice("Укажите коллекцию и название записи.");
             return null;
         }
         try {
@@ -375,7 +375,7 @@ final class DesktopWindow {
                 Platform.runLater(() -> {
                     draftId = id;
                     if (id != null) libraryPanel.refresh(true, id);
-                    finishFormAction(systemAudio ? "Не удалось начать запись" : "Не удалось открыть встречу",
+                    finishFormAction(systemAudio ? "Не удалось начать запись" : "Не удалось открыть страницу",
                             error instanceof IOException ? error.getMessage() : null);
                 });
             }
@@ -614,7 +614,7 @@ final class DesktopWindow {
                         invitation.clear();
                     }
                     if (!stopped && finishRequested) {
-                        status.setText("Встреча завершена");
+                        status.setText("Окно браузера закрыто");
                     }
                     if (closing) completeClose();
                     buttons();

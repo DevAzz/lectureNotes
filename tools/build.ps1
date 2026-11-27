@@ -31,14 +31,15 @@ if ($AppImage) {
     $jdkBin = Split-Path -Parent (Get-Command jpackage).Source
     $jdkModules = Join-Path (Split-Path -Parent $jdkBin) 'jmods'
     $modulePath = (@($jdkModules) + @($javafxJars)) -join [IO.Path]::PathSeparator
-    $packageOptions = @('--type', 'app-image', '--name', 'LectureNotes', '--dest', $distribution,
+    $appName = 'RecordNotes'
+    $packageOptions = @('--type', 'app-image', '--name', $appName, '--dest', $distribution,
         '--temp', $temporary, '--input', $appInput, '--main-jar', 'lecture-notes.jar',
         '--main-class', 'org.example.Main', '--module-path', $modulePath,
         '--add-modules', "java.desktop,java.net.http,java.sql,jdk.crypto.ec,jdk.zipfs,$fxModules",
         '--java-options', "--add-modules=$fxModules", '--java-options', $nativeAccess)
     & jpackage @packageOptions
     if ($LASTEXITCODE -ne 0) { throw "Windows packaging failed ($LASTEXITCODE)." }
-    $launcher = Join-Path $distribution 'LectureNotes/LectureNotes.exe'
+    $launcher = Join-Path $distribution "$appName/$appName.exe"
     $check = Start-Process -FilePath $launcher -ArgumentList '--check' -WindowStyle Hidden -Wait -PassThru
     if ($check.ExitCode -ne 0) { throw "Packaged application startup check failed ($($check.ExitCode))." }
     Get-Item -LiteralPath $launcher

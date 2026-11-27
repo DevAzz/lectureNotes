@@ -21,7 +21,7 @@ final class DesktopDialogs {
 
     static void notice(Window owner, String message) {
         var alert = new Alert(Alert.AlertType.INFORMATION, null, ButtonType.OK);
-        prepare(alert, owner, "Конспекты лекций");
+        prepare(alert, owner, Main.APP_TITLE);
         alert.getDialogPane().setContent(text(owner, message));
         alert.showAndWait();
     }
@@ -95,7 +95,7 @@ final class DesktopDialogs {
 
     /**
      * Сообщение переносится по фиксированной ширине, поэтому окно никогда не оказывается шире экрана,
-     * и кнопки подтверждения остаются видимыми при любом названии лекции или предмета.
+     * и кнопки подтверждения остаются видимыми при любом названии записи или коллекции.
      */
     private static Label text(Window owner, String message) {
         var label = new Label(message);

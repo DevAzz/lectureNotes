@@ -16,4 +16,4 @@ if ($LASTEXITCODE -ne 0) { throw "Tabs check compilation failed ($LASTEXITCODE).
     '--enable-native-access=javafx.graphics,javafx.media,org.xerial.sqlitejdbc,ALL-UNNAMED' `
     -cp "$jar;$work" org.example.LibraryTabsCheck (Join-Path $work 'library')
 if ($LASTEXITCODE -ne 0) { throw "Tabs check failed ($LASTEXITCODE)." }
-Write-Output 'Subjects and settings tabs verified'
+Write-Output 'Collections and settings tabs verified'

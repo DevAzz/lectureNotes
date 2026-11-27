@@ -23,7 +23,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
-/** Проверка вкладок «Предметы» и «Настройки» и их связи с библиотекой. */
+/** Проверка вкладок «Коллекции» и «Настройки» и их связи с библиотекой. */
 public final class LibraryTabsCheck {
     private static SubjectsPanel subjectsPanel;
     private static SettingsPanel settingsPanel;
@@ -73,7 +73,7 @@ public final class LibraryTabsCheck {
                         "app.css parses without errors");
             }
         }
-        System.out.println("Subjects and settings tabs verified");
+        System.out.println("Collections and settings tabs verified");
         System.out.flush();
     }
 
@@ -90,6 +90,10 @@ public final class LibraryTabsCheck {
             var root = stage.getScene().getRoot();
             var bar = (DocumentTaskBar) root.lookup(".document-task-bar");
             var sections = (TabPane) root.lookup(".tab-pane");
+            require(stage.getTitle().equals("Записи и конспекты"), "the window has the new title");
+            require(sections.getTabs().stream().map(javafx.scene.control.Tab::getText).toList()
+                    .equals(java.util.List.of("Запись", "Библиотека", "Коллекции", "Настройки")),
+                    "main tabs use recording and collection terminology");
             require(!darkBackground((Region) root), "a new window with another library uses the saved light theme");
             sections.getSelectionModel().select(3);
             root.applyCss();
@@ -121,7 +125,7 @@ public final class LibraryTabsCheck {
             var root = window.get().getScene().getRoot();
             var query = root.lookupAll(".text-field").stream().filter(TextField.class::isInstance)
                     .map(TextField.class::cast).filter(field -> field.getPromptText() != null
-                            && field.getPromptText().startsWith("Поиск по лекциям")).findFirst().orElseThrow();
+                            && field.getPromptText().startsWith("Поиск по записям")).findFirst().orElseThrow();
             query.setText("производная");
         });
         awaitTrue(() -> window.get().getScene().getRoot().lookupAll(".list-cell").stream()
@@ -164,6 +168,16 @@ public final class LibraryTabsCheck {
         library.saveWhisperSettings(cli, model, true, "ru");
         library.saveDiarizationModels(Files.createFile(work.resolve("segments-test.onnx")),
                 Files.createFile(work.resolve("voices-test.onnx")));
+        library.saveNoteSettings("""
+                Составь связный конспект лекции по предоставленному материалу. Выбери структуру и объём по содержанию
+                и фокусу. Сохраняй смысл лекции и опускай лишние повторы. Реплики и черновики служат материалом лекции.
+                """, 25);
+        library.saveSetting("reading_prompt", """
+                Раздели текст лекции на смысловые абзацы. Начинай новый абзац при переходе к другой мысли,
+                примеру или вопросу. Объединяй строки, которые продолжают одну мысль.
+                """.strip());
+        require(library.noteSystemPrompt().equals(LocalProcessing.DEFAULT_SYSTEM_PROMPT)
+                && library.readingPrompt().equals(LocalProcessing.READING_PROMPT), "saved defaults use the new wording");
         library.saveNoteSettings("Собери конспект свободным текстом.", 25);
         library.saveProfile(null, "Внешний API", "https://example.com/v1", "большая модель", true,
                 16_000, 1_000, 300, null, false);
@@ -183,9 +197,9 @@ public final class LibraryTabsCheck {
         require(subjects.getItems().stream().anyMatch(item -> item.name().equals("Математический анализ")
                         && item.lectures() == 2 && item.notes() == 0),
                 "the subject card counts its lectures: " + subjects.getItems());
-        require(button("Создать предмет") != null && subjectAction("Перенести все лекции") != null
+        require(button("Создать коллекцию") != null && subjectAction("Перенести все записи") != null
                 && subjectAction("Удалить") != null && button("В библиотеку") != null
-                && subjectAction("Перенести выбранную лекцию") != null, "subject actions are present");
+                && subjectAction("Перенести выбранную запись") != null, "collection actions are present");
         require(!subjectAction("Изменить").isDisable(), "the selected subject can be edited");
 
         fx(() -> field("#subject-search").setText("истори"));
@@ -214,10 +228,10 @@ public final class LibraryTabsCheck {
         require(lectures.getItems().stream().allMatch(item -> item.subject().equals("Математический анализ")),
                 "the lecture list belongs to the subject: " + lectures.getItems());
         fx(() -> lectures.getSelectionModel().select(0));
-        awaitTrue(() -> !subjectAction("Перенести выбранную лекцию").isDisable()
-                && !button("Открыть лекцию").isDisabled(), "a selected lecture can be moved or opened");
+        awaitTrue(() -> !subjectAction("Перенести выбранную запись").isDisable()
+                && !button("Открыть запись").isDisabled(), "a selected recording can be moved or opened");
         require(labels(subjectsPanel).contains("Курс лекций первого семестра"), "the subject description is shown");
-        require(labels(subjectsPanel).contains("2 лекц."), "the details line counts the lectures");
+        require(labels(subjectsPanel).contains("Записей: 2"), "the details line counts the recordings");
         fx(() -> {
             ((Stage) subjectsPanel.getScene().getWindow()).close();
             subjectsPanel.close();
@@ -264,7 +278,7 @@ public final class LibraryTabsCheck {
         awaitTrue(() -> ((CheckBox) node("#whisper-cpu")).isSelected(), "the CPU flag is restored");
         awaitTrue(() -> {
             var text = labels(settingsPanel);
-            return text.contains("3 лекций") && text.contains("JDK ") && text.contains("whisper-cli.exe");
+            return text.contains("Коллекций: 2 · записей: 3") && text.contains("JDK ") && text.contains("whisper-cli.exe");
         }, "library counters and build information");
         fx(() -> {
             var themes = themeChoices(settingsPanel);

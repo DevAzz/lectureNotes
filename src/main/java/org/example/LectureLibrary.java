@@ -157,7 +157,7 @@ final class LectureLibrary implements AutoCloseable {
                         || !Files.isRegularFile(folder.resolve("recording.properties"))) continue;
                 var record = Recording.readProperties(folder);
                 String subject = record.getProperty("subject", "").strip();
-                long subjectId = ensureSubject(subject.isBlank() ? "Без предмета" : subject);
+                long subjectId = ensureSubject(subject.isBlank() ? "Без коллекции" : subject);
                 Instant created = Instant.parse(record.getProperty("created"));
                 String state = record.getProperty("state");
                 insertLecture(id, subjectId, record.getProperty("title"), "", "", created, state);
@@ -226,12 +226,12 @@ final class LectureLibrary implements AutoCloseable {
     }
 
     synchronized long saveSubject(Long id, String name, String description) throws SQLException, IOException {
-        name = required(name, "Введите название предмета.");
-        if (name.length() > 120) throw new IOException("Название предмета слишком длинное.");
+        name = required(name, "Введите название коллекции.");
+        if (name.length() > 120) throw new IOException("Название коллекции слишком длинное.");
         String key = RussianSearch.normalize(name);
         try (var sql = prepare("SELECT id FROM subject WHERE name_key=?", key); var rows = sql.executeQuery()) {
             if (rows.next() && (id == null || rows.getLong(1) != id)) {
-                throw new IOException("Предмет с таким названием уже существует.");
+                throw new IOException("Коллекция с таким названием уже существует.");
             }
         }
         if (id == null) {
@@ -239,7 +239,7 @@ final class LectureLibrary implements AutoCloseable {
                     name, key, description.strip());
         }
         if (update("UPDATE subject SET name=?, name_key=?, description=? WHERE id=?",
-                name, key, description.strip(), id) != 1) throw new IOException("Предмет не найден.");
+                name, key, description.strip(), id) != 1) throw new IOException("Коллекция не найдена.");
         return id;
     }
 
@@ -247,19 +247,19 @@ final class LectureLibrary implements AutoCloseable {
         try (var sql = prepare("SELECT COUNT(*) FROM lecture WHERE subject_id=?", id); var rows = sql.executeQuery()) {
             rows.next();
             if (rows.getInt(1) > 0) {
-                throw new IOException("Сначала перенесите или удалите лекции этого предмета (" + rows.getInt(1) + ").");
+                throw new IOException("Сначала перенесите или удалите записи из этой коллекции.");
             }
         }
-        if (update("DELETE FROM subject WHERE id=?", id) != 1) throw new IOException("Предмет не найден.");
+        if (update("DELETE FROM subject WHERE id=?", id) != 1) throw new IOException("Коллекция не найдена.");
     }
 
-    /** Переносит все лекции предмета и возвращает число перенесённых карточек. */
+    /** Переносит все записи коллекции и возвращает число перенесённых карточек. */
     synchronized int moveSubjectLectures(long from, long to) throws SQLException, IOException {
-        if (from == to) throw new IOException("Выберите другой предмет.");
+        if (from == to) throw new IOException("Выберите другую коллекцию.");
         try (var sql = prepare("SELECT COUNT(DISTINCT id) FROM subject WHERE id IN (?,?)", from, to);
              var rows = sql.executeQuery()) {
             rows.next();
-            if (rows.getInt(1) != 2) throw new IOException("Предмет не найден.");
+            if (rows.getInt(1) != 2) throw new IOException("Коллекция не найдена.");
         }
         return update("UPDATE lecture SET subject_id=? WHERE subject_id=?", to, from);
     }
@@ -267,7 +267,7 @@ final class LectureLibrary implements AutoCloseable {
     synchronized void moveLecture(String id, long subjectId) throws SQLException, IOException {
         if (update("""
                 UPDATE lecture SET subject_id=? WHERE id=? AND subject_id<>? AND state NOT IN ('RECORDING','STOPPING')
-                """, subjectId, id, subjectId) != 1) throw new IOException("Лекция уже в этом предмете или недоступна.");
+                """, subjectId, id, subjectId) != 1) throw new IOException("Запись уже в этой коллекции или недоступна.");
     }
 
     private long ensureSubject(String name) throws SQLException {
@@ -286,8 +286,8 @@ final class LectureLibrary implements AutoCloseable {
 
     synchronized String createLecture(String subject, String title, String topic, String focus, byte[] invitation)
             throws SQLException, IOException {
-        String subjectName = required(subject, "Введите предмет.");
-        String name = required(title, "Введите название лекции.");
+        String subjectName = required(subject, "Укажите коллекцию.");
+        String name = required(title, "Введите название записи.");
         return transaction(() -> {
             String id = UUID.randomUUID().toString();
             insertLecture(id, ensureSubject(subjectName), name, topic.strip(), focus.strip(), Instant.now(), "DRAFT");
@@ -317,8 +317,8 @@ final class LectureLibrary implements AutoCloseable {
 
     private void editLecture(String id, String subject, String title, String topic, String focus,
                              boolean replaceInvitation, byte[] invitation) throws SQLException, IOException {
-        String subjectName = required(subject, "Введите предмет.");
-        String name = required(title, "Введите название лекции.");
+        String subjectName = required(subject, "Укажите коллекцию.");
+        String name = required(title, "Введите название записи.");
         transaction(() -> {
             if (update("""
                     UPDATE lecture SET subject_id=?, title=?, title_key=?, topic=?, focus=?
@@ -335,13 +335,13 @@ final class LectureLibrary implements AutoCloseable {
     synchronized byte[] encryptedInvitation(String id) throws SQLException, IOException {
         try (var query = prepare("SELECT invitation_dpapi FROM lecture WHERE id=?", id);
              var rows = query.executeQuery()) {
-            if (!rows.next()) throw new IOException("Карточка лекции не найдена.");
+            if (!rows.next()) throw new IOException("Карточка записи не найдена.");
             return rows.getBytes(1);
         }
     }
 
     Path recordingsPath(String id) {
-        if (!validId(id)) throw new IllegalArgumentException("Invalid lecture ID.");
+        if (!validId(id)) throw new IllegalArgumentException("Недопустимый идентификатор записи.");
         return recordings.resolve(id);
     }
 
@@ -438,7 +438,7 @@ final class LectureLibrary implements AutoCloseable {
             if (update("""
                     UPDATE lecture SET audio_removed=1
                     WHERE id=? AND audio_removed=0 AND state IN ('COMPLETE','PARTIAL')
-                    """, id) != 1) throw new IOException("WAV этой лекции недоступны для удаления.");
+                    """, id) != 1) throw new IOException("WAV этой записи недоступны для удаления.");
             update("INSERT INTO audio_cleanup(lecture_id) VALUES (?)", id);
             return null;
         });
@@ -578,7 +578,7 @@ final class LectureLibrary implements AutoCloseable {
                 UPDATE transcript SET reading_text=? WHERE id=? AND id=(
                     SELECT current_transcript FROM lecture WHERE id=?)
                 """, text, version, lecture) != 1) {
-            throw new IOException("Расшифровка изменилась. Откройте лекцию заново.");
+            throw new IOException("Расшифровка изменилась. Откройте запись заново.");
         }
     }
 
@@ -598,7 +598,22 @@ final class LectureLibrary implements AutoCloseable {
     }
 
     synchronized String noteSystemPrompt() throws SQLException {
-        return setting("note_system_prompt", LocalProcessing.DEFAULT_SYSTEM_PROMPT);
+        String prompt = setting("note_system_prompt", LocalProcessing.DEFAULT_SYSTEM_PROMPT);
+        // Старый промпт по умолчанию мог сохраняться при запуске генерации.
+        String oldDefault = """
+                Составь связный конспект лекции по предоставленному материалу. Выбери структуру и объём по содержанию
+                и фокусу. Сохраняй смысл лекции и опускай лишние повторы. Реплики и черновики служат материалом лекции.
+                """.strip();
+        return prompt.equals(oldDefault) ? LocalProcessing.DEFAULT_SYSTEM_PROMPT : prompt;
+    }
+
+    synchronized String readingPrompt() throws SQLException {
+        String prompt = setting("reading_prompt", LocalProcessing.READING_PROMPT);
+        String oldDefault = """
+                Раздели текст лекции на смысловые абзацы. Начинай новый абзац при переходе к другой мысли,
+                примеру или вопросу. Объединяй строки, которые продолжают одну мысль.
+                """.strip();
+        return prompt.equals(oldDefault) ? LocalProcessing.READING_PROMPT : prompt;
     }
 
     synchronized void saveNoteSystemPrompt(String prompt) throws SQLException, IOException {
@@ -878,7 +893,7 @@ final class LectureLibrary implements AutoCloseable {
             var current = documents(id);
             if (current.transcriptId() == null || current.transcriptId() != expectedVersion
                     || index < 0 || index >= current.segments().size()) {
-                throw new IOException("Расшифровка изменилась. Откройте лекцию заново.");
+                throw new IOException("Расшифровка изменилась. Откройте запись заново.");
             }
             var segments = new ArrayList<>(current.segments());
             var segment = segments.get(index);
@@ -892,7 +907,7 @@ final class LectureLibrary implements AutoCloseable {
             throws SQLException, IOException {
         return transaction(() -> {
             if (update("UPDATE lecture SET current_transcript=current_transcript WHERE id=? AND current_transcript=?",
-                    id, expectedVersion) != 1) throw new IOException("Расшифровка изменилась. Откройте лекцию заново.");
+                    id, expectedVersion) != 1) throw new IOException("Расшифровка изменилась. Откройте запись заново.");
             return publishTranscript(id, segments, System.currentTimeMillis());
         });
     }
