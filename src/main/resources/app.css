@@ -24,6 +24,13 @@
 .tab-pane > .tab-header-area > .headers-region > .tab:selected { -fx-background-color: white; }
 .tab .tab-label { -fx-text-fill: -ink-soft; }
 .tab:selected .tab-label { -fx-text-fill: #10233f; -fx-font-weight: 700; }
+
+.document-task-bar {
+    -fx-background-color: #eef4fc;
+    -fx-border-color: #cddced transparent transparent transparent;
+    -fx-padding: 7 14;
+    -fx-min-height: 44;
+}
 .tab-pane > .tab-header-area > .headers-region > .tab:selected .focus-indicator { -fx-border-color: transparent; }
 
 .button {

@@ -9,6 +9,7 @@ import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
+import javafx.scene.control.TabPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.stage.Stage;
@@ -57,6 +58,7 @@ public final class LibraryTabsCheck {
             try {
                 subjectsChecks(library);
                 settingsChecks(library);
+                taskBarChecks(work.resolve("tasks"));
             } catch (Throwable error) {
                 System.setErr(previous);
                 error.addSuppressed(new AssertionError("JavaFX log:\n"
@@ -70,6 +72,42 @@ public final class LibraryTabsCheck {
         }
         System.out.println("Subjects and settings tabs verified");
         System.out.flush();
+    }
+
+    private static void taskBarChecks(Path work) throws Exception {
+        var library = new LectureLibrary(work);
+        var lecture = library.lecture(library.createLecture("История", "Реформы", "", ""));
+        library.saveNote(lecture.id(), null, "Проверка перехода", false);
+        var window = new AtomicReference<Stage>();
+        fx(() -> {
+            new DesktopWindow(work, library, new LibraryLocation(work)).show();
+            var stage = (Stage) Stage.getWindows().getLast();
+            window.set(stage);
+            var root = stage.getScene().getRoot();
+            var bar = (DocumentTaskBar) root.lookup(".document-task-bar");
+            var sections = (TabPane) root.lookup(".tab-pane");
+            require(!bar.isManaged(), "empty task bar takes no space");
+            bar.start(lecture, DocumentTaskBar.Operation.NOTE);
+            sections.getSelectionModel().select(2);
+            require(bar.isVisible() && bar.lookup(".progress-indicator").isVisible(), "task survives tab change");
+            bar.finish(null);
+            var open = bar.lookupAll(".button").stream().map(Button.class::cast)
+                    .filter(b -> b.isVisible() && b.getText().equals("Открыть конспект")).findFirst().orElseThrow();
+            open.fire();
+            require(sections.getSelectionModel().getSelectedItem().getText().equals("Библиотека"), "library opened");
+            var tabs = (TabPane) sections.getSelectionModel().getSelectedItem().getContent().lookup(".tab-pane");
+            require(tabs.getSelectionModel().getSelectedItem().getText().equals("Конспект"), "note tab opened");
+            bar.start(lecture, DocumentTaskBar.Operation.READING);
+            bar.finish("Ошибка модели");
+            require(!open.isVisible() && !bar.lookup(".progress-indicator").isVisible(), "failed task has no result");
+        });
+        awaitTrue(() -> {
+            var source = (TextArea) window.get().getScene().lookup(".note-source");
+            return source != null && source.getText().equals("Проверка перехода");
+        }, "opened the document for the task's lecture");
+        fx(() -> window.get().fireEvent(new javafx.stage.WindowEvent(window.get(),
+                javafx.stage.WindowEvent.WINDOW_CLOSE_REQUEST)));
+        awaitTrue(() -> !window.get().isShowing(), "task window closed");
     }
 
     private static void seed(LectureLibrary library, Path work) throws Exception {

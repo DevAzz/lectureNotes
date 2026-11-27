@@ -79,6 +79,7 @@ final class LibraryPanel extends VBox {
     private final Tab recordingTab;
     private final Tab transcriptTab;
     private final Tab noteTab;
+    private final Tab readingTab;
     private List<LectureLibrary.Subject> subjects = List.of();
     private LectureLibrary.Lecture shown;
     private long playbackVersion;
@@ -89,7 +90,7 @@ final class LibraryPanel extends VBox {
 
     LibraryPanel(Window owner, LectureLibrary library, Consumer<LectureLibrary.Lecture> openMeeting,
                  Predicate<String> reserved, Consumer<String> onLectureDeleted, Runnable chooseLibraryFolder,
-                 Runnable openSubjects) {
+                 Runnable openSubjects, DocumentTaskBar taskBar) {
         super(10);
         this.owner = owner;
         this.library = library;
@@ -98,7 +99,7 @@ final class LibraryPanel extends VBox {
         this.onLectureDeleted = onLectureDeleted;
         this.openSubjects = openSubjects;
         player = new RecordingPlayer(this::notice);
-        documents = new LectureDocuments(owner, player, library, () -> refresh(false, null));
+        documents = new LectureDocuments(owner, player, library, () -> refresh(false, null), taskBar);
         documents.busyProperty().addListener((obs, prior, value) -> updateButtons());
         liveDraft.setPlaceholder(new Label("Живых реплик пока нет"));
         liveDraft.setCellFactory(source -> new ListCell<>() {
@@ -135,8 +136,8 @@ final class LibraryPanel extends VBox {
         recordingTab = new Tab("Запись", recordingPane);
         transcriptTab = new Tab("Расшифровка", documents.transcriptPanel());
         noteTab = new Tab("Конспект", documents.notePanel());
-        tabs.getTabs().addAll(recordingTab, transcriptTab, noteTab,
-                new Tab("Текст для чтения", documents.readingPanel()));
+        readingTab = new Tab("Текст для чтения", documents.readingPanel());
+        tabs.getTabs().addAll(recordingTab, transcriptTab, noteTab, readingTab);
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
         var lecturePane = new BorderPane(tabs);
         player.setPadding(new Insets(10));
@@ -377,6 +378,27 @@ final class LibraryPanel extends VBox {
             case CARD -> recordingTab;
             case SEGMENT -> transcriptTab;
             case NOTE -> noteTab;
+        });
+    }
+
+    void openTaskResult(LectureLibrary.Lecture item, DocumentTaskBar.Operation operation) {
+        if (shown == null || !shown.id().equals(item.id())) {
+            if (!documents.canLeaveSelection()) return;
+            var hit = results.getItems().stream().filter(h -> h.lecture().id().equals(item.id())).findFirst();
+            applying = true;
+            results.getSelectionModel().clearSelection();
+            hit.ifPresent(h -> {
+                results.getSelectionModel().select(h);
+                results.scrollTo(h);
+            });
+            applying = false;
+            renderLecture(hit.map(LectureLibrary.Hit::lecture).orElse(item));
+            refresh(false, null);
+        }
+        tabs.getSelectionModel().select(switch (operation) {
+            case NOTE -> noteTab;
+            case READING -> readingTab;
+            case RECOGNITION, SPEAKERS -> transcriptTab;
         });
     }
 

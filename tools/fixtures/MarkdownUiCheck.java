@@ -249,7 +249,8 @@ public final class MarkdownUiCheck {
             var item = library.lecture(id);
             fx(() -> {
                 var player = new RecordingPlayer(message -> { });
-                documents = new LectureDocuments(new Stage(), player, library, () -> { });
+                documents = new LectureDocuments(new Stage(), player, library, () -> { },
+                        new DocumentTaskBar((lecture, operation) -> { }));
                 var panel = documents.notePanel();
                 notePanel = panel;
                 var stage = new Stage();

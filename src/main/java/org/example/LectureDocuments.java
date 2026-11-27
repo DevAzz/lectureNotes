@@ -77,7 +77,11 @@ final class LectureDocuments {
     private String systemPrompt = LocalProcessing.DEFAULT_SYSTEM_PROMPT;
     private int noteTimeLimitMinutes = LectureLibrary.DEFAULT_NOTE_TIME_LIMIT_MINUTES;
 
-    LectureDocuments(Window owner, RecordingPlayer player, LectureLibrary library, Runnable onPublished) {
+    private final DocumentTaskBar taskBar;
+
+    LectureDocuments(Window owner, RecordingPlayer player, LectureLibrary library, Runnable onPublished,
+                     DocumentTaskBar taskBar) {
+        this.taskBar = taskBar;
         this.owner = owner;
         this.player = player;
         this.library = library;
@@ -305,7 +309,7 @@ final class LectureDocuments {
         }
         String id = selected.id();
         LocalProcessing.Whisper engine = whisper;
-        run("Распознаём речь", () -> {
+        run(DocumentTaskBar.Operation.RECOGNITION, () -> {
             var audio = new Recording(library.recordingsPath(id));
             var result = LocalProcessing.transcribe(audio, engine);
             long version = library.saveTranscript(id, result);
@@ -325,7 +329,7 @@ final class LectureDocuments {
         if (source.stream().anyMatch(segment -> segment.speaker() != null)
                 && !DesktopDialogs.confirm(owner, "Разметка спикеров", "Заменить текущие метки спикеров?")) return;
         int index = transcript.getSelectionModel().getSelectedIndex();
-        run("Размечаем спикеров", () -> {
+        run(DocumentTaskBar.Operation.SPEAKERS, () -> {
             var labeled = singleSpeaker
                     ? source.stream().map(s -> new LocalProcessing.Segment(s.start(), s.end(), s.text(), "Спикер 1", null)).toList()
                     : SpeakerDiarization.label(new Recording(library.recordingsPath(id)), source, library.diarizationModels());
@@ -427,7 +431,7 @@ final class LectureDocuments {
         boolean needsKey = chosen.hasSecret();
         long profileId = chosen.id();
         if (forReading) {
-            run("Разбиваем текст на абзацы", () -> {
+            run(DocumentTaskBar.Operation.READING, () -> {
                 String secret = needsKey ? InvitationSecret.unprotectText(library.profileSecret(profileId)) : "";
                 String text = LocalProcessing.formatReading(source, chosen.llm(secret), requestedPrompt,
                         java.time.Duration.ofMinutes(minutes));
@@ -443,7 +447,7 @@ final class LectureDocuments {
         }
         systemPrompt = requestedPrompt;
         noteTimeLimitMinutes = minutes;
-        run("Формируем конспект", () -> {
+        run(DocumentTaskBar.Operation.NOTE, () -> {
             String secret = needsKey ? InvitationSecret.unprotectText(library.profileSecret(profileId)) : "";
             library.saveNoteSettings(requestedPrompt, minutes);
             String markdown = LocalProcessing.generate(item.topic().isBlank() ? item.title() : item.topic(),
@@ -523,6 +527,15 @@ final class LectureDocuments {
     private interface Background { Runnable call() throws Exception; }
 
     private void run(String message, Background task, boolean publish) {
+        run(message, task, publish, null);
+    }
+
+    private void run(DocumentTaskBar.Operation operation, Background task, boolean publish) {
+        taskBar.start(selected, operation);
+        run(operation.running, task, publish, operation);
+    }
+
+    private void run(String message, Background task, boolean publish, DocumentTaskBar.Operation operation) {
         long request = selection;
         busy.set(true);
         showStatus(message);
@@ -533,6 +546,7 @@ final class LectureDocuments {
                 Platform.runLater(() -> {
                     if (closed) return;
                     busy.set(false);
+                    if (operation != null) taskBar.finish(null);
                     if (request == selection) {
                         showStatus("Готово");
                         completed.run();
@@ -545,12 +559,13 @@ final class LectureDocuments {
                     if (closed) return;
                     busy.set(false);
                     updateButtons();
-                    if (request != selection) return;
-                    showStatus("Операция завершилась ошибкой");
                     String detail = error instanceof IOException && error.getMessage() != null
                             && error.getMessage().codePoints().anyMatch(cp -> cp >= 0x410 && cp <= 0x44f)
                             ? error.getMessage() : "Не удалось выполнить операцию.";
-                    DesktopDialogs.notice(owner, detail);
+                    if (operation != null) taskBar.finish(detail);
+                    if (request != selection) return;
+                    showStatus("Операция завершилась ошибкой");
+                    if (operation == null) DesktopDialogs.notice(owner, detail);
                 });
             }
         });

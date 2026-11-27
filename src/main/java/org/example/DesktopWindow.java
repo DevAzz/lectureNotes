@@ -60,6 +60,7 @@ final class DesktopWindow {
     private final Tab subjectsTab;
     private final Tab settingsTab;
     private final LibraryPanel libraryPanel;
+    private final DocumentTaskBar taskBar = new DocumentTaskBar(this::openTaskResult);
     private final SubjectsPanel subjectsPanel;
     private final SettingsPanel settingsPanel;
     private MeetingBrowser browser;
@@ -80,7 +81,7 @@ final class DesktopWindow {
         this.library = library;
         this.location = location;
         libraryPanel = new LibraryPanel(stage, library, this::loadDraft, this::reserved, this::onLectureDeleted,
-                this::chooseLibraryFolder, this::showSubjectsTab);
+                this::chooseLibraryFolder, this::showSubjectsTab, taskBar);
         subjectsPanel = new SubjectsPanel(stage, library, this::showSubjectInLibrary, this::openLectureInLibrary,
                 () -> libraryPanel.refresh(true, null));
         settingsPanel = new SettingsPanel(stage, library, data, this::chooseLibraryFolder,
@@ -97,7 +98,9 @@ final class DesktopWindow {
             if (current == meetingTab) reloadSubjects();
         });
         stage.setTitle("Конспекты лекций");
-        var scene = new Scene(sections, 1080, 640);
+        var root = new VBox(sections, taskBar);
+        VBox.setVgrow(sections, Priority.ALWAYS);
+        var scene = new Scene(root, 1080, 640);
         var stylesheet = DesktopWindow.class.getResource("/app.css");
         if (stylesheet != null) scene.getStylesheets().add(stylesheet.toExternalForm());
         stage.setScene(scene);
@@ -152,6 +155,11 @@ final class DesktopWindow {
     private void openLectureInLibrary(String id) {
         sections.getSelectionModel().select(libraryTab);
         libraryPanel.refresh(true, id);
+    }
+
+    private void openTaskResult(LectureLibrary.Lecture item, DocumentTaskBar.Operation operation) {
+        sections.getSelectionModel().select(libraryTab);
+        libraryPanel.openTaskResult(item, operation);
     }
 
     private void chooseLibraryFolder() {
@@ -222,6 +230,7 @@ final class DesktopWindow {
     }
 
     private void onLectureDeleted(String id) {
+        taskBar.forget(id);
         if (id.equals(draftId)) clearDraft();
     }
 
