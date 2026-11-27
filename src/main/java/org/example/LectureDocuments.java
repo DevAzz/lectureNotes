@@ -118,10 +118,11 @@ final class LectureDocuments {
             for (var segment : transcript.getItems()) markdown.append("- ").append(segment).append('\n');
             export("transcript.md", markdown.toString());
         });
-        var panel = new VBox(8, status, transcript, new HBox(8, recognize, whisperSettings, exportTranscript),
+        var panel = new VBox(8, transcript, status, new HBox(8, recognize, whisperSettings, exportTranscript),
                 new HBox(8, playLine, editLine), new HBox(8, diarize, renameSpeaker));
-        panel.setPadding(new Insets(10));
+        panel.setPadding(new Insets(6, 10, 10, 10));
         VBox.setVgrow(transcript, Priority.ALWAYS);
+        showStatus("");
         updateButtons();
         return panel;
     }
@@ -136,10 +137,11 @@ final class LectureDocuments {
         playReference.setOnAction(event -> playReference());
         revisions.setOnAction(event -> showRevisions());
         delete.setOnAction(event -> deleteNote());
-        var panel = new VBox(8, noteStatus, noteEditor, new HBox(8, generate, save, revisions, delete),
+        var panel = new VBox(8, noteEditor, noteStatus, new HBox(8, generate, save, revisions, delete),
                 new HBox(8, playReference, exportNote));
-        panel.setPadding(new Insets(10));
+        panel.setPadding(new Insets(6, 10, 10, 10));
         VBox.setVgrow(noteEditor, Priority.ALWAYS);
+        showStatus("");
         updateButtons();
         return panel;
     }
@@ -516,9 +518,15 @@ final class LectureDocuments {
         delete.setDisable(!available || currentNote == null);
     }
 
+    /** Пустая строка состояния не занимает место, поэтому панель документов начинается сразу с её содержимого. */
     private void showStatus(String value) {
         status.setText(value);
         noteStatus.setText(value);
+        boolean visible = !value.isBlank();
+        status.setVisible(visible);
+        status.setManaged(visible);
+        noteStatus.setVisible(visible);
+        noteStatus.setManaged(visible);
     }
 
     boolean canLeaveSelection() {

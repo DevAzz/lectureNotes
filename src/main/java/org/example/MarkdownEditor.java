@@ -1,6 +1,7 @@
 package org.example;
 
 import javafx.animation.PauseTransition;
+import javafx.beans.binding.BooleanBinding;
 import javafx.beans.property.ReadOnlyBooleanWrapper;
 import javafx.geometry.Insets;
 import javafx.geometry.Orientation;
@@ -22,6 +23,7 @@ import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
 import javafx.util.Duration;
 
 import java.util.ArrayList;
@@ -33,7 +35,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Редактор конспекта: панель форматирования, поле Markdown и живой просмотр.
+ * Редактор конспекта: лента форматирования в стиле Word, поле Markdown и живой просмотр.
+ * Группы значков подписаны, а режимы просмотра вынесены в нижнюю строку отдельно от правки.
  * Полем по-прежнему управляет LectureDocuments, поэтому сохранение редакций не меняется.
  */
 final class MarkdownEditor extends BorderPane {
@@ -47,6 +50,7 @@ final class MarkdownEditor extends BorderPane {
         }
     }
 
+    private static final String TABLE = "| Термин | Определение |\n| --- | --- |\n|  |  |\n|  |  |";
     private static final String PARAGRAPH = "Абзац";
     private static final String BULLET = "- ";
     private static final String TASK = "- [ ] ";
@@ -66,12 +70,16 @@ final class MarkdownEditor extends BorderPane {
     private final Label status = new Label();
     private final Label hint = new Label("Ctrl+B · Ctrl+I · Ctrl+E · Ctrl+K · Ctrl+S · Enter продолжает список");
     private final ComboBox<String> style = new ComboBox<>();
-    private final Button timecode = new Button("Таймкод");
+    private final Button timecode;
+    private final Button undoTool;
+    private final Button redoTool;
     private final ToggleGroup modes = new ToggleGroup();
     private final PauseTransition debounce = new PauseTransition(Duration.millis(280));
     private final ReadOnlyBooleanWrapper timecodeEnabled = new ReadOnlyBooleanWrapper(true);
+    private final ReadOnlyBooleanWrapper editingVisible = new ReadOnlyBooleanWrapper(true);
     private final List<Button> tools = new ArrayList<>();
     private final LongSupplier playback;
+    private final BooleanBinding toolsDisabled;
     private Runnable saveAction = () -> { };
     private Mode mode = Mode.SPLIT;
     private boolean dirty;
@@ -79,6 +87,7 @@ final class MarkdownEditor extends BorderPane {
     MarkdownEditor(TextArea editor, LongSupplier playback) {
         this.editor = editor;
         this.playback = playback;
+        toolsDisabled = editor.editableProperty().not().or(editingVisible.getReadOnlyProperty().not());
         getStyleClass().add("note-editor");
 
         editor.getStyleClass().add("note-source");
@@ -93,19 +102,18 @@ final class MarkdownEditor extends BorderPane {
         BorderPane.setMargin(split, new Insets(6, 0, 4, 0));
 
         style.getItems().setAll(STYLES);
-        style.setPromptText("Стиль абзаца");
-        style.setPrefWidth(132);
+        style.setPromptText("Абзац");
+        style.getStyleClass().add("md-combo");
         style.setOnAction(event -> {
             String choice = style.getValue();
             style.getSelectionModel().clearSelection();
             if (choice != null) applyStyle(choice);
         });
 
-        timecode.setTooltip(new Tooltip("Вставить ссылку на текущий момент воспроизведения"));
-        timecode.setOnAction(event -> insertTimecode());
-        timecode.disableProperty().bind(editor.editableProperty().not()
-                .or(timecodeEnabled.getReadOnlyProperty().not()));
-        style.disableProperty().bind(editor.editableProperty().not());
+        timecode = tool("timecode", EditorIcons.clock(), "Таймкод", "Вставить ссылку на текущий момент воспроизведения",
+                this::insertTimecode);
+        undoTool = iconButton("undo", EditorIcons.undo(), "Отменить", "Отменить (Ctrl+Z)", this::undo);
+        redoTool = iconButton("redo", EditorIcons.redo(), "Повторить", "Повторить (Ctrl+Y)", this::redo);
 
         debounce.setOnFinished(event -> preview.setMarkdown(editor.getText()));
         setTop(toolbar());
@@ -115,34 +123,63 @@ final class MarkdownEditor extends BorderPane {
         updateStatus();
     }
 
+    /** Лента форматирования: группы значков с подписями, как в ленте текстового редактора. */
     private FlowPane toolbar() {
-        var box = new FlowPane(5, 5);
+        var box = new FlowPane(0, 3);
         box.getStyleClass().add("note-toolbar");
         box.setAlignment(Pos.CENTER_LEFT);
-        box.getChildren().setAll(style, separator(),
-                tool("Жирный", "Полужирный (Ctrl+B)", () -> wrap("**", "**")),
-                tool("Курсив", "Курсив (Ctrl+I)", () -> wrap("*", "*")),
-                tool("Зачёркнутый", "Зачёркнутый текст", () -> wrap("~~", "~~")),
-                tool("Код", "Строчный код (Ctrl+E)", () -> wrap("`", "`")),
-                tool("Ссылка", "Ссылка (Ctrl+K)", this::insertLink),
-                separator(),
-                tool("Список", "Маркированный список", () -> prefixLines(BULLET)),
-                tool("Нумерация", "Нумерованный список", this::numberLines),
-                tool("Задача", "Строка-задача", () -> prefixLines(TASK)),
-                tool("Цитата", "Цитата", () -> prefixLines("> ")),
-                tool("Блок кода", "Закреплённый блок кода", this::fence),
-                tool("Таблица", "Таблица Markdown", () -> insertBlock(
-                        "| Термин | Определение |\n| --- | --- |\n|  |  |\n|  |  |")),
-                tool("Разделитель", "Разделитель", () -> insertBlock("---")),
-                separator(), timecode, modeGroup());
-        for (var tool : tools) tool.disableProperty().bind(editor.editableProperty().not());
+        var history = group("Правка", undoTool, redoTool);
+        history.getStyleClass().add("md-group-first");
+        box.getChildren().setAll(history,
+                group("Стили", style),
+                group("Формат",
+                        tool("bold", EditorIcons.bold(), "Жирный", "Полужирный (Ctrl+B)", () -> wrap("**", "**")),
+                        tool("italic", EditorIcons.italic(), "Курсив", "Курсив (Ctrl+I)", () -> wrap("*", "*")),
+                        tool("strike", EditorIcons.strike(), "Зачёркнутый", "Зачёркнутый текст",
+                                () -> wrap("~~", "~~")),
+                        tool("inline-code", EditorIcons.inlineCode(), "Код", "Строчный код (Ctrl+E)",
+                                () -> wrap("`", "`")),
+                        tool("link", EditorIcons.link(), "Ссылка", "Ссылка (Ctrl+K)", this::insertLink)),
+                group("Абзац",
+                        tool("bullet", EditorIcons.bulletList(), "Список", "Маркированный список",
+                                () -> prefixLines(BULLET)),
+                        tool("numbered", EditorIcons.numberList(), "Нумерация", "Нумерованный список",
+                                this::numberLines),
+                        tool("task", EditorIcons.taskList(), "Задача", "Строка-задача", () -> prefixLines(TASK)),
+                        tool("quote", EditorIcons.quote(), "Цитата", "Цитата", () -> prefixLines("> "))),
+                group("Вставка",
+                        tool("code-block", EditorIcons.codeBlock(), "Блок кода", "Закреплённый блок кода", this::fence),
+                        tool("table", EditorIcons.table(), "Таблица", "Таблица Markdown", () -> insertBlock(TABLE)),
+                        tool("rule", EditorIcons.rule(), "Разделитель", "Разделитель", () -> insertBlock("---")),
+                        timecode));
+        for (var control : tools) control.disableProperty().bind(toolsDisabled);
+        style.disableProperty().bind(toolsDisabled);
+        timecode.disableProperty().bind(toolsDisabled.or(timecodeEnabled.getReadOnlyProperty().not()));
+        undoTool.disableProperty().bind(toolsDisabled.or(editor.undoableProperty().not()));
+        redoTool.disableProperty().bind(toolsDisabled.or(editor.redoableProperty().not()));
         return box;
     }
 
+    /** Группа ленты: ряд значков и подпись под ним, отделённая тонкой чертой от соседней группы. */
+    private static VBox group(String caption, Node... controls) {
+        var row = new HBox(2, controls);
+        row.getStyleClass().add("md-group-tools");
+        var label = new Label(caption);
+        label.getStyleClass().add("md-group-caption");
+        label.setMaxWidth(Double.MAX_VALUE);
+        label.setAlignment(Pos.CENTER);
+        var box = new VBox(1, row, label);
+        box.getStyleClass().add("md-group");
+        return box;
+    }
+
+    /** Нижняя строка: счётчик текста слева и отдельный переключатель режимов просмотра справа. */
     private HBox footer() {
         status.getStyleClass().add("note-status");
         hint.getStyleClass().add("note-hint");
-        var box = new HBox(10, status, spacer(), hint);
+        var caption = new Label("Просмотр");
+        caption.getStyleClass().add("note-view-caption");
+        var box = new HBox(9, status, spacer(), hint, separator(), caption, viewSwitch());
         box.getStyleClass().add("note-footer");
         box.setAlignment(Pos.CENTER_LEFT);
         return box;
@@ -151,9 +188,9 @@ final class MarkdownEditor extends BorderPane {
     private static Node separator() {
         var separator = new Separator(Orientation.VERTICAL);
         separator.getStyleClass().add("note-tool-separator");
-        separator.setMinHeight(22);
-        separator.setPrefHeight(22);
-        separator.setMaxHeight(22);
+        separator.setMinHeight(18);
+        separator.setPrefHeight(18);
+        separator.setMaxHeight(18);
         return separator;
     }
 
@@ -163,34 +200,62 @@ final class MarkdownEditor extends BorderPane {
         return region;
     }
 
-    /** Кнопки режима держатся вместе и переносятся на новую строку как группа. */
-    private HBox modeGroup() {
-        var box = new HBox(4, modeButton("Правка", Mode.EDIT), modeButton("Два окна", Mode.SPLIT),
-                modeButton("Просмотр", Mode.PREVIEW));
-        box.getStyleClass().add("note-modes");
+    /** Переключатель режимов вынесен в нижнюю строку и не смешивается с инструментами правки. */
+    private HBox viewSwitch() {
+        var box = new HBox(2, viewButton("edit", EditorIcons.pencil(), "Правка", "Только поле разметки", Mode.EDIT),
+                viewButton("split", EditorIcons.splitPanes(), "Два окна", "Разметка и просмотр рядом", Mode.SPLIT),
+                viewButton("preview", EditorIcons.eye(), "Просмотр", "Только отформатированный конспект",
+                        Mode.PREVIEW));
+        box.getStyleClass().add("note-view");
         return box;
     }
 
-    private Button tool(String label, String tooltip, Runnable action) {
-        var button = new Button(label);
-        button.getStyleClass().add("md-tool");
-        button.setTooltip(new Tooltip(tooltip));
-        button.setOnAction(event -> action.run());
+    private Button tool(String id, Node icon, String label, String tooltip, Runnable action) {
+        var button = iconButton(id, icon, label, tooltip, action);
         tools.add(button);
         return button;
     }
 
-    private ToggleButton modeButton(String label, Mode value) {
-        var button = new ToggleButton(label);
+    private Button iconButton(String id, Node icon, String label, String tooltip, Runnable action) {
+        var button = new Button();
+        button.setId("md-" + id);
+        button.getStyleClass().add("md-tool");
+        button.setGraphic(icon);
+        button.setAccessibleText(label);
+        button.setTooltip(new Tooltip(tooltip));
+        button.setOnAction(event -> {
+            action.run();
+            editor.requestFocus();
+        });
+        return button;
+    }
+
+    private ToggleButton viewButton(String id, Node icon, String label, String tooltip, Mode value) {
+        var button = new ToggleButton();
+        button.setId("md-view-" + id);
         button.getStyleClass().add("md-mode");
+        button.setGraphic(icon);
+        button.setAccessibleText(label);
+        button.setTooltip(new Tooltip(tooltip));
         button.setToggleGroup(modes);
         button.setSelected(mode == value);
         button.setOnAction(event -> applyMode(value));
         return button;
     }
 
+    private void undo() {
+        if (editor.isUndoable()) editor.undo();
+        editor.requestFocus();
+    }
+
+    private void redo() {
+        if (editor.isRedoable()) editor.redo();
+        editor.requestFocus();
+    }
+
     private void applyMode(Mode value) {
         mode = value;
+        editingVisible.set(value != Mode.PREVIEW);
         split.getItems().setAll(switch (value) {
             case EDIT -> List.of(editor);
             case SPLIT -> List.of(editor, preview);

@@ -4,6 +4,7 @@ import javafx.application.Platform;
 import javafx.scene.Node;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.ToggleButton;
@@ -136,18 +137,14 @@ public final class MarkdownUiCheck {
         return url.toExternalForm();
     }
 
-    private static Button button(Node root, String text) {
-        for (var node : root.lookupAll(".button")) {
-            if (node instanceof Button button && text.equals(button.getText())) return button;
-        }
-        throw new AssertionError("button not found: " + text);
+    private static Button tool(Node root, String id) {
+        if (!(root.lookup("#" + id) instanceof Button button)) throw new AssertionError("tool not found: " + id);
+        return button;
     }
 
-    private static ToggleButton toggle(Node root, String text) {
-        for (var node : root.lookupAll(".md-mode")) {
-            if (node instanceof ToggleButton toggle && text.equals(toggle.getText())) return toggle;
-        }
-        throw new AssertionError("mode toggle not found: " + text);
+    private static ToggleButton mode(Node root, String id) {
+        if (!(root.lookup("#" + id) instanceof ToggleButton toggle)) throw new AssertionError("mode not found: " + id);
+        return toggle;
     }
 
     private static void editorChecks() throws Exception {
@@ -160,6 +157,19 @@ public final class MarkdownUiCheck {
             stage.setScene(scene);
             stage.show();
             require(count(editor, ".md-tool") >= 12, "formatting toolbar");
+            require(count(editor, ".md-group") == 5, "ribbon groups");
+            var captions = new StringBuilder();
+            for (var node : editor.lookupAll(".md-group-caption")) captions.append(((Label) node).getText()).append(' ');
+            require(captions.toString().contains("Формат") && captions.toString().contains("Вставка"),
+                    "ribbon group captions: " + captions);
+            require(tool(editor, "md-bold").getText().isEmpty(), "tool buttons show icons, not words");
+            require(tool(editor, "md-bold").getTooltip().getText().contains("Ctrl+B"), "tooltip keeps the shortcut");
+            require(tool(editor, "md-bold").getAccessibleText().equals("Жирный"), "tool keeps an accessible name");
+            require(editor.lookup(".note-toolbar").lookupAll(".md-mode").isEmpty(), "the ribbon has no view buttons");
+            var view = editor.lookup(".note-view");
+            require(view != null && view.getParent().getStyleClass().contains("note-footer"),
+                    "the view switch sits in the footer, away from the editing tools");
+            require(count(view, ".md-mode") == 3, "three view modes");
 
             var toolbar = editor.lookup(".note-toolbar");
             require(toolbar instanceof FlowPane, "toolbar that wraps to the next row");
@@ -167,25 +177,25 @@ public final class MarkdownUiCheck {
             flow.resize(520, 80);
             flow.layout();
             require(flow.getChildren().stream().anyMatch(node -> node.getLayoutY() > 1),
-                    "toolbar buttons move to the next row when the window is narrow");
+                    "toolbar groups move to the next row when the window is narrow");
 
             area.setText("обычный текст");
             area.selectRange(0, area.getLength());
-            button(editor, "Жирный").fire();
+            tool(editor, "md-bold").fire();
             require("**обычный текст**".equals(area.getText()), "bold wrap: " + area.getText());
             area.selectRange(0, area.getLength());
-            button(editor, "Жирный").fire();
+            tool(editor, "md-bold").fire();
             require("обычный текст".equals(area.getText()), "bold unwrap: " + area.getText());
 
             area.setText("Заголовок раздела");
             area.selectRange(0, area.getLength());
-            button(editor, "Список").fire();
+            tool(editor, "md-bullet").fire();
             require("- Заголовок раздела".equals(area.getText()), "list prefix: " + area.getText());
             area.selectRange(0, area.getLength());
-            button(editor, "Цитата").fire();
+            tool(editor, "md-quote").fire();
             require("> Заголовок раздела".equals(area.getText()), "quote prefix: " + area.getText());
             area.selectRange(0, area.getLength());
-            button(editor, "Цитата").fire();
+            tool(editor, "md-quote").fire();
             require("Заголовок раздела".equals(area.getText()), "quote removed: " + area.getText());
 
             area.setText("Пункт один");
@@ -208,18 +218,21 @@ public final class MarkdownUiCheck {
 
             area.clear();
             area.positionCaret(0);
-            button(editor, "Таймкод").fire();
+            tool(editor, "md-timecode").fire();
             require(area.getText().contains("[00:01:01](#t=61500)"), "timecode insert: " + area.getText());
 
             area.setText(SAMPLE);
-            toggle(editor, "Просмотр").fire();
+            mode(editor, "md-view-preview").fire();
             editor.refreshPreview();
             var split = (SplitPane) editor.lookup(".split-pane");
             require(split.getItems().size() == 1 && split.getItems().getFirst() != area, "preview only mode");
             require(count(editor, ".md-h1") >= 1, "preview renders markdown");
-            toggle(editor, "Два окна").fire();
+            require(tool(editor, "md-bold").isDisabled() && tool(editor, "md-bullet").isDisabled()
+                    && tool(editor, "md-timecode").isDisabled(), "editing tools rest in the preview mode");
+            mode(editor, "md-view-split").fire();
             require(split.getItems().size() == 2, "split mode");
-            toggle(editor, "Правка").fire();
+            require(!tool(editor, "md-bold").isDisabled(), "editing tools return with the source field");
+            mode(editor, "md-view-edit").fire();
             require(split.getItems().size() == 1 && split.getItems().getFirst() == area, "edit mode");
             stage.close();
         });
