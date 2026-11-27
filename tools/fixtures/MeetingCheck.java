@@ -1,8 +1,5 @@
 package org.example;
 
-import com.microsoft.playwright.BrowserType;
-import com.microsoft.playwright.Playwright;
-import com.microsoft.playwright.Route;
 import com.microsoft.playwright.options.AriaRole;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
@@ -10,79 +7,17 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
-import org.example.SaluteJazzPage.State;
 
 public class MeetingCheck {
-    private static final URI INVITATION = MeetingBrowser.invitation("https://salutejazz.ru/test-meeting");
-    private static final String ROOM = """
-            <button aria-label="Выйти из встречи">×</button>
-            <button>Участники</button>
-            """;
-    private static final String GUEST_ROOM = """
-            <nav><button>Войти</button></nav>
-            <header><div>Видеовстреча</div><div>01:34</div></header>
-            """;
-
     public static void main(String[] args) throws Exception {
         Path work = Path.of(args[0]).toAbsolutePath();
-        checkScreens();
+        expect("https://meet.example.org:8443/call?q=1#room", MeetingBrowser.invitation(
+                " https://meet.example.org:8443/call?q=1#room ").toString());
         checkBrowser(work);
-        System.out.println("Meeting screen detection, incoming WebRTC sound, media permissions and profile cleanup verified.");
-    }
-
-    private static void checkScreens() {
-        var options = new Playwright.CreateOptions().setEnv(Map.of("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1"));
-        try (var playwright = Playwright.create(options);
-             var browser = playwright.chromium().launch(new BrowserType.LaunchOptions().setChannel("chrome"))) {
-            var page = browser.newPage();
-            page.route("**/*", route -> route.fulfill(new Route.FulfillOptions()
-                    .setContentType("text/html; charset=utf-8").setBody("<main></main>")));
-            page.navigate(INVITATION.toString());
-            page.setContent("<button>Подключиться</button>");
-            expect(State.PREJOIN, SaluteJazzPage.observe(page, INVITATION));
-            page.setContent("<p role=status>Пожалуйста, ожидайте. Организатор скоро вас впустит</p>" + ROOM);
-            expect(State.WAITING_ADMISSION, SaluteJazzPage.observe(page, INVITATION));
-            page.setContent("<input type=password>" + ROOM);
-            expect(State.AUTHENTICATING, SaluteJazzPage.observe(page, INVITATION));
-            page.setContent("<button>Участники</button>");
-            expect(State.WAITING_USER, SaluteJazzPage.observe(page, INVITATION));
-            page.setContent(ROOM);
-            expect(State.IN_CALL, SaluteJazzPage.observe(page, INVITATION));
-            page.setContent(ROOM + "<p>Встреча завершена</p>");
-            expect(State.IN_CALL, SaluteJazzPage.observe(page, INVITATION));
-            page.setContent("<p role=status>Восстанавливаем соединение…</p>" + ROOM);
-            expect(State.RECONNECTING, SaluteJazzPage.observe(page, INVITATION));
-            page.setContent("<div role=dialog><h2>Организатор завершил встречу</h2></div>" + ROOM);
-            expect(State.ENDED, SaluteJazzPage.observe(page, INVITATION));
-            page.setContent("<p role=alert>Организатор исключил вас из зала ожидания</p>");
-            expect(State.DENIED, SaluteJazzPage.observe(page, INVITATION));
-            page.navigate("https://other.salutejazz.ru/test-meeting");
-            page.setContent(ROOM);
-            expect(State.AUTHENTICATING, SaluteJazzPage.observe(page, INVITATION));
-
-            var guestInvitation = MeetingBrowser.invitation("https://salutejazz.ru/calls/test");
-            page.navigate(guestInvitation.toString());
-            page.setContent(GUEST_ROOM);
-            expect(State.IN_CALL, SaluteJazzPage.observe(page, guestInvitation));
-            var oldInvitation = MeetingBrowser.invitation("https://jazz.sber.ru/calls/test");
-            expect(State.IN_CALL, SaluteJazzPage.observe(page, oldInvitation));
-            page.setContent(GUEST_ROOM + "<button>Подключиться</button>");
-            expect(State.PREJOIN, SaluteJazzPage.observe(page, guestInvitation));
-            page.setContent(GUEST_ROOM + "<input type=email>");
-            expect(State.AUTHENTICATING, SaluteJazzPage.observe(page, guestInvitation));
-            page.setContent("<nav><button>Войти</button></nav><header>Семинар</header>");
-            expect(State.WAITING_USER, SaluteJazzPage.observe(page, guestInvitation));
-            page.navigate("https://salutejazz.ru/");
-            page.setContent(GUEST_ROOM);
-            expect(State.WAITING_USER, SaluteJazzPage.observe(page, guestInvitation));
-            page.navigate("https://other.salutejazz.ru/calls/test");
-            page.setContent(GUEST_ROOM);
-            expect(State.AUTHENTICATING, SaluteJazzPage.observe(page, guestInvitation));
-        }
+        System.out.println("Browser navigation, incoming WebRTC sound, media permissions and profile cleanup verified.");
     }
 
     private static void checkBrowser(Path work) throws Exception {
@@ -148,17 +83,17 @@ public class MeetingCheck {
         });
         server.start();
         try {
-            URI localPage = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/");
+            URI localPage = MeetingBrowser.invitation("http://127.0.0.1:" + server.getAddress().getPort() + "/");
             try (var meeting = MeetingBrowser.open(work, localPage)) {
                 expect("mic=denied&camera=denied", received.get(10, TimeUnit.SECONDS));
-                expect(State.AUTHENTICATING, meeting.observe());
                 var recording = Files.createDirectory(work.resolve("recording"));
                 var helper = Capture.start(meeting.process(), recording);
                 try {
                     var started = CompletableFuture.supplyAsync(() -> helper.inputReader().lines().findFirst().orElse(""));
                     expect("{\"event\":\"started\",\"pid\":" + meeting.process().pid() + "}",
                             started.get(10, TimeUnit.SECONDS));
-                    meeting.controlledPage().getByRole(AriaRole.BUTTON).click();
+                    meeting.controlledPage().getByRole(AriaRole.BUTTON).click(
+                            new com.microsoft.playwright.Locator.ClickOptions().setTimeout(10_000));
                     playing.get(10, TimeUnit.SECONDS);
                     Thread.sleep(1_500);
                     helper.getOutputStream().close();

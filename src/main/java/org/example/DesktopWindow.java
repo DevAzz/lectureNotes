@@ -17,7 +17,6 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
-import org.example.SaluteJazzPage.State;
 
 import java.io.IOException;
 import java.net.URI;
@@ -25,8 +24,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -39,16 +37,17 @@ final class DesktopWindow {
     private final Path data;
     private final LectureLibrary library;
     private final LibraryLocation location;
-    private final ScheduledExecutorService workers = Executors.newSingleThreadScheduledExecutor();
+    private final ExecutorService workers = Executors.newSingleThreadExecutor();
     private final ComboBox<String> subject = new ComboBox<>();
     private final TextField title = new TextField();
     private final TextField topic = new TextField();
     private final TextField focus = new TextField();
     private final TextField invitation = new TextField();
-    private final Button open = new Button("Подключиться и записать");
+    private final Button open = new Button("Открыть ссылку");
+    private final Button systemRecord = new Button("Записать звук компьютера");
     private final Button save = new Button("Сохранить карточку");
     private final Button reset = new Button("Новая карточка");
-    private final Button start = new Button("Я на встрече · начать запись");
+    private final Button start = new Button("Начать запись");
     private final Button stop = new Button("Остановить запись");
     private final Button leave = new Button("Завершить встречу");
     private final Label status = new Label("Готово к подключению");
@@ -64,17 +63,13 @@ final class DesktopWindow {
     private final SubjectsPanel subjectsPanel;
     private final SettingsPanel settingsPanel;
     private MeetingBrowser browser;
-    private ScheduledFuture<?> browserWatch;
-    private State browserState = State.WAITING_USER;
     private Process capture;
     private Thread liveWorker;
     private boolean signalReported;
     private String draftId;
     private String activeId;
-    private Instant recordingRequestedAt;
     private boolean busy;
     private boolean stopped;
-    private boolean captureStartFailed;
     private boolean finishing;
     private boolean finishRequested;
     private boolean closing;
@@ -189,14 +184,16 @@ final class DesktopWindow {
         DesktopDialogs.field(form, 1, "Название", title);
         DesktopDialogs.field(form, 2, "Тема", topic);
         DesktopDialogs.field(form, 3, "Фокус конспекта", focus);
-        DesktopDialogs.field(form, 4, "Ссылка SaluteJazz", invitation);
+        DesktopDialogs.field(form, 4, "Ссылка на лекцию", invitation);
         form.setMaxWidth(690);
-        invitation.setPromptText("https://");
-        open.setOnAction(event -> openMeeting());
+        invitation.setPromptText("https://…");
+        open.setOnAction(event -> beginRecording(false));
+        systemRecord.setOnAction(event -> beginRecording(true));
         save.setOnAction(event -> saveCard());
         reset.setOnAction(event -> clearDraft());
-        start.setOnAction(event -> startCapture(true));
+        start.setOnAction(event -> startCapture());
         stop.setOnAction(event -> {
+            if (browser == null) finishRequested = true;
             stopped = true;
             recordStop();
         });
@@ -205,8 +202,8 @@ final class DesktopWindow {
             leaveMeeting();
         });
         level.setPrefWidth(270);
-        var meter = new HBox(10, new Label("Входящий звук Chrome"), level);
-        var cardActions = new HBox(8, open, save, reset);
+        var meter = new HBox(10, new Label("Уровень звука записи"), level);
+        var cardActions = new HBox(8, systemRecord, open, save, reset);
         var captureActions = new HBox(8, start, stop, leave);
         liveText.setEditable(false);
         liveText.setWrapText(true);
@@ -229,7 +226,7 @@ final class DesktopWindow {
     }
 
     private void loadDraft(LectureLibrary.Lecture item) {
-        if (busy || browser != null || closing) {
+        if (busy || activeId != null || closing) {
             notice("Сначала завершите текущую встречу.");
             return;
         }
@@ -287,7 +284,7 @@ final class DesktopWindow {
             URI link = invitation.getText().isBlank() ? null : MeetingBrowser.invitation(invitation.getText());
             return new Draft(subjectValue(), title.getText(), topic.getText(), focus.getText(), link);
         } catch (IllegalArgumentException error) {
-            notice("Введите HTTPS-ссылку на встречу в SaluteJazz.");
+            notice("Введите ссылку на страницу (http:// или https://).");
             return null;
         }
     }
@@ -320,22 +317,20 @@ final class DesktopWindow {
         });
     }
 
-    private void openMeeting() {
+    private void beginRecording(boolean systemAudio) {
         Draft draft = readDraft();
         if (draft == null) return;
         URI link = draft.invitation();
-        if (link == null) {
-            notice("Введите HTTPS-ссылку на встречу в SaluteJazz.");
+        if (!systemAudio && link == null) {
+            notice("Введите ссылку на страницу (http:// или https://).");
             return;
         }
         String current = draftId;
         busy = true;
-        recordingRequestedAt = Instant.now();
         stopped = false;
-        captureStartFailed = false;
         finishing = false;
         finishRequested = false;
-        status.setText("Открываем отдельное окно Chrome");
+        status.setText(systemAudio ? "Готовим запись звука компьютера" : "Открываем отдельное окно Chrome");
         buttons();
         workers.execute(() -> {
             String saved = current;
@@ -343,17 +338,21 @@ final class DesktopWindow {
                 Capture.helper();
                 String id = persistDraft(current, draft);
                 saved = id;
-                MeetingBrowser launched = MeetingBrowser.open(data, link);
+                MeetingBrowser launched = systemAudio ? null : MeetingBrowser.open(data, link);
                 Platform.runLater(() -> {
                     draftId = id;
                     activeId = id;
                     browser = launched;
-                    browserState = State.AUTHENTICATING;
                     busy = false;
-                    status.setText("Войдите в браузере и дождитесь допуска к встрече");
                     libraryPanel.refresh(true, id);
                     if (closing) leaveMeeting();
-                    else watchBrowser(launched);
+                    else if (systemAudio) startCapture();
+                    else {
+                        status.setText("Когда будете готовы, нажмите «Начать запись»");
+                        launched.process().onExit().thenRun(() -> Platform.runLater(() -> {
+                            if (browser == launched && !busy && !finishing) endIfMeetingClosed();
+                        }));
+                    }
                     buttons();
                 });
             } catch (Exception error) {
@@ -361,7 +360,8 @@ final class DesktopWindow {
                 Platform.runLater(() -> {
                     draftId = id;
                     if (id != null) libraryPanel.refresh(true, id);
-                    finishFormAction("Не удалось открыть встречу", error instanceof IOException ? error.getMessage() : null);
+                    finishFormAction(systemAudio ? "Не удалось начать запись" : "Не удалось открыть встречу",
+                            error instanceof IOException ? error.getMessage() : null);
                 });
             }
         });
@@ -375,86 +375,30 @@ final class DesktopWindow {
         else if (detail != null) notice(detail);
     }
 
-    private void watchBrowser(MeetingBrowser session) {
-        browserWatch = workers.scheduleWithFixedDelay(new Runnable() {
-            private State previous;
-
-            @Override public void run() {
-                State state = session.observe();
-                boolean confirmed = state != State.IN_CALL || previous == State.IN_CALL;
-                previous = state;
-                if (confirmed) Platform.runLater(() -> {
-                    if (browserState != state) onBrowserState(session, state);
-                });
-            }
-        }, 0, 500, TimeUnit.MILLISECONDS);
-    }
-
-    private void onBrowserState(MeetingBrowser session, State state) {
-        if (browser != session || finishing) return;
-        browserState = state;
-        if (busy) return;
-        if (endIfMeetingClosed()) return;
-        if (capture == null && !stopped) showBrowserState();
-        if (!tryStartAutomatically()) buttons();
-    }
-
-    private void showBrowserState() {
-        status.setText(switch (browserState) {
-            case WAITING_USER -> "Продолжите в Chrome. Если вы уже на встрече, начните запись вручную";
-            case AUTHENTICATING -> "Продолжите в Chrome. Если появится проверка входа, пройдите её вручную";
-            case PREJOIN -> "Подключитесь к встрече в Chrome";
-            case WAITING_ADMISSION -> "Ожидаем допуска организатора";
-            case IN_CALL -> "Допуск к встрече подтверждён";
-            case RECONNECTING -> "SaluteJazz восстанавливает соединение";
-            case DENIED -> "Организатор отклонил подключение";
-            case ENDED -> "Встреча завершена в SaluteJazz";
-            case CLOSED -> "Окно встречи закрылось";
-        });
-    }
-
     private boolean endIfMeetingClosed() {
-        if (!closing && browserState != State.ENDED && !browser.process().isAlive()) browserState = State.CLOSED;
-        if (!closing && browserState != State.ENDED && browserState != State.CLOSED) return false;
-        if (!stopped && capture == null && !closing) showBrowserState();
-        if (browserState == State.ENDED) finishRequested = true;
+        if (!closing && (browser == null || browser.process().isAlive())) return false;
+        if (!closing && !stopped) status.setText("Окно браузера закрылось");
         leaveMeeting();
         return true;
     }
 
-    private boolean tryStartAutomatically() {
-        if (busy || closing || finishing || browser == null || stopped || captureStartFailed || capture != null
-                || browserState != State.IN_CALL) return false;
-        startCapture(false);
-        return true;
-    }
-
-    private void startCapture(boolean manual) {
-        if (!browser.process().isAlive()) {
+    private void startCapture() {
+        if (browser != null && !browser.process().isAlive()) {
             leaveMeeting();
             return;
         }
         busy = true;
         var session = browser;
         String id = activeId;
-        Instant requestedAt = recordingRequestedAt;
-        String recordingAction = open.getText();
+        Instant requestedAt = Instant.now();
+        String recordingAction = session == null ? systemRecord.getText() : start.getText();
         status.setText("Запускаем захват звука");
         buttons();
         workers.execute(() -> {
             Path output = null;
             try {
-                State current = session.observe();
-                if ((manual && !current.canStartManually()) || (!manual && current != State.IN_CALL)) {
-                    Platform.runLater(() -> {
-                        busy = false;
-                        onBrowserState(session, current);
-                        if (closing && browser == session && !finishing) leaveMeeting();
-                    });
-                    return;
-                }
                 output = library.startRecording(id, requestedAt, recordingAction).directory();
-                Process process = Capture.start(session.process(), output);
+                Process process = session == null ? Capture.startSystem(output) : Capture.start(session.process(), output);
                 Path recordingDirectory = output;
                 Platform.runLater(() -> {
                     capture = process;
@@ -469,10 +413,11 @@ final class DesktopWindow {
                 if (output != null) try { library.finishRecording(id, "EMPTY"); } catch (Exception ignored) { }
                 Platform.runLater(() -> {
                     busy = false;
-                    captureStartFailed = true;
+                    if (session == null) activeId = null;
                     status.setText("Захват не запустился");
                     libraryPanel.refresh(false, null);
-                    if (!endIfMeetingClosed()) notice("Не удалось запустить модуль записи.");
+                    if (!endIfMeetingClosed()) notice(failure instanceof IOException ? failure.getMessage()
+                            : "Не удалось запустить модуль записи.");
                     buttons();
                 });
             }
@@ -545,10 +490,7 @@ final class DesktopWindow {
                         if (capture != process || busy) return;
                         level.setProgress(peak / 32768.0);
                         if (signal) signalReported = true;
-                        String connection = browserState == State.RECONNECTING ? " · восстанавливаем соединение" : "";
-                        if (connection.isEmpty() && waitingForSound) {
-                            connection = " · нет входящего звука";
-                        }
+                        String connection = waitingForSound ? " · нет входящего звука" : "";
                         status.setText("Идёт запись · " + RecordingPlayer.timestamp(millis) + connection);
                     });
                 }
@@ -589,7 +531,7 @@ final class DesktopWindow {
         capture = null;
         level.setProgress(0);
         busy = true;
-        boolean partial = stopped || !finishRequested || exit != 0;
+        boolean partial = (browser != null && stopped) || !finishRequested || exit != 0;
         boolean noSignalReported = !signalReported;
         stopped = true;
         buttons();
@@ -625,7 +567,7 @@ final class DesktopWindow {
                 status.setText(state == null ? "Запись требует восстановления" : exit != 0 ? "Захват прервался" :
                         state.equals("EMPTY") ? "Аудио не получено" : noSignal ?
                                 "Запись сохранена · входящего звука не было" : "Запись сохранена в библиотеке");
-                if (finishing) leaveMeeting();
+                if (finishing || browser == null) leaveMeeting();
                 else endIfMeetingClosed();
                 libraryPanel.refresh(false, null);
                 buttons();
@@ -641,10 +583,6 @@ final class DesktopWindow {
         }
         MeetingBrowser session = browser;
         browser = null;
-        if (browserWatch != null) {
-            browserWatch.cancel(false);
-            browserWatch = null;
-        }
         busy = true;
         buttons();
         workers.execute(() -> {
@@ -656,12 +594,11 @@ final class DesktopWindow {
                     busy = false;
                     activeId = null;
                     finishing = false;
-                    recordingRequestedAt = null;
                     if (stopped) {
                         draftId = null;
                         invitation.clear();
                     }
-                    if (!stopped && browserState != State.CLOSED && browserState != State.ENDED) {
+                    if (!stopped && finishRequested) {
                         status.setText("Встреча завершена");
                     }
                     if (closing) completeClose();
@@ -673,11 +610,12 @@ final class DesktopWindow {
 
     private void buttons() {
         boolean idle = !busy && !closing;
-        boolean editing = idle && browser == null;
+        boolean editing = idle && activeId == null;
+        systemRecord.setDisable(!editing);
         open.setDisable(!editing);
         save.setDisable(!editing);
         reset.setDisable(!editing);
-        start.setDisable(!idle || browser == null || stopped || capture != null || !browserState.canStartManually());
+        start.setDisable(!idle || browser == null || stopped || capture != null);
         stop.setDisable(!idle || capture == null);
         leave.setDisable(!idle || browser == null);
         subject.setDisable(!editing);
@@ -693,7 +631,7 @@ final class DesktopWindow {
         closing = true;
         buttons();
         if (busy) return;
-        if (browser != null) leaveMeeting();
+        if (activeId != null) leaveMeeting();
         else completeClose();
     }
 

@@ -80,7 +80,7 @@ final class LiveCaptureCheck {
                     """.formatted(OLD_CARD));
             statement.execute("PRAGMA user_version=1");
         }
-        String link = "https://salutejazz.ru/calls/test?psw=synthetic-invitation-password";
+        String link = "https://meet.example.org/calls/test?psw=synthetic-invitation-password";
         String id;
         try (var library = new LectureLibrary(directory)) {
             check(library.lecture(OLD_CARD).title().equals("Лекция"), "Migration preserved existing lecture");

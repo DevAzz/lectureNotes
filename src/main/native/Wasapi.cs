@@ -114,9 +114,9 @@ internal static class Wasapi
         [PreserveSig] int GetNextPacketSize(out uint frames);
     }
 
-    internal static IAudioClient Activate(uint pid, WaitHandle stop)
+    internal static IAudioClient Activate(uint pid, WaitHandle stop, bool excludeTarget)
     {
-        var parameters = new ActivationParameters { Type = 1, ProcessId = pid, Mode = 0 };
+        var parameters = new ActivationParameters { Type = 1, ProcessId = pid, Mode = excludeTarget ? 1u : 0u };
         int size = Marshal.SizeOf(parameters);
         IntPtr memory = Marshal.AllocHGlobal(size);
         var handler = new ActivationHandler();

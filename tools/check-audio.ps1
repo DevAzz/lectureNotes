@@ -1,4 +1,4 @@
-param([switch]$Chrome)
+param([switch]$Chrome, [switch]$SystemAudio)
 
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
@@ -105,6 +105,7 @@ audio.play().catch(error => console.error('LECTURENOTES_AUDIO_FAILED', error.nam
     $remainder = 0L
     $fileTimeMillis = [Math]::DivRem($target.StartTime.ToFileTimeUtc(), 10000L, [ref]$remainder)
     $start.Arguments = "capture-ms $($target.Id) $fileTimeMillis `"$work`""
+    if ($SystemAudio) { $start.Arguments = "capture-system `"$work`"" }
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardInput = $true
@@ -140,9 +141,10 @@ audio.play().catch(error => console.error('LECTURENOTES_AUDIO_FAILED', error.nam
         2 * [Math]::Sqrt($real * $real + $imaginary * $imaginary) / 44100
     }
     $included = Measure-Tone 440
-    $excluded = Measure-Tone 997
-    if ($included -lt 100 -or $excluded -gt ($included / 50)) {
-        throw "Unexpected signal levels (440 Hz = $included, 997 Hz = $excluded). $eventLog"
+    $externalLevel = Measure-Tone 997
+    $wrongExternalLevel = if ($SystemAudio) { $externalLevel -lt 100 } else { $externalLevel -gt ($included / 50) }
+    if ($included -lt 100 -or $wrongExternalLevel) {
+        throw "Unexpected signal levels (440 Hz = $included, 997 Hz = $externalLevel). $eventLog"
     }
     if ($external.HasExited) { throw 'The control process exited during capture.' }
 
@@ -166,7 +168,7 @@ audio.play().catch(error => console.error('LECTURENOTES_AUDIO_FAILED', error.nam
         Pid = $target.Id
         Format = "PCM $bits-bit, $rate Hz, $channels channels"
         Included440Hz = [Math]::Round($included, 2)
-        Excluded997Hz = [Math]::Round($excluded, 2)
+        External997Hz = [Math]::Round($externalLevel, 2)
         Recovery = 'Frame-aligned WAV verified'
         Recording = $wave.FullName
     }

@@ -14,7 +14,7 @@ final class InvitationSecret {
 
     static byte[] protect(URI link) throws IOException, InterruptedException {
         if (link == null) return null;
-        byte[] data = link.toASCIIString().getBytes(StandardCharsets.UTF_8);
+        byte[] data = link.toString().getBytes(StandardCharsets.UTF_8);
         if (data.length > MAX_PLAINTEXT) throw new IOException("Ссылка на встречу слишком длинная.");
         return transform("protect-invitation", data);
     }

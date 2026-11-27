@@ -39,6 +39,13 @@ internal static class Program
             }
             uint pid;
             long creation;
+            if (args.Length == 2 && args[0] == "capture-system")
+            {
+                // The helper produces no audio. Excluding it captures all playback sources.
+                using (var helper = Process.GetCurrentProcess())
+                    Capture((uint)helper.Id, helper, Path.GetFullPath(args[1]), true);
+                return 0;
+            }
             if (args.Length != 4 || (args[0] != "capture" && args[0] != "capture-ms") ||
                 !uint.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out pid) ||
                 pid == 0 || pid > int.MaxValue ||
@@ -63,7 +70,7 @@ internal static class Program
         }
     }
 
-    private static void Capture(uint pid, Process target, string directory)
+    private static void Capture(uint pid, Process target, string directory, bool excludeTarget = false)
     {
         var drive = new DriveInfo(Path.GetPathRoot(directory));
         if (drive.AvailableFreeSpace < MinimumStart) throw new IOException("Disk space");
@@ -81,7 +88,7 @@ internal static class Program
         using (var ready = new AutoResetEvent(false))
         using (var chunks = new WaveChunks(directory))
         {
-            var audio = Wasapi.Activate(pid, stop);
+            var audio = Wasapi.Activate(pid, stop, excludeTarget);
             if (audio == null || stop.WaitOne(0)) return;
             try
             {

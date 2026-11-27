@@ -33,6 +33,11 @@ final class Capture {
                 output.toString()).redirectError(ProcessBuilder.Redirect.DISCARD).start();
     }
 
+    static Process startSystem(Path output) throws IOException {
+        return new ProcessBuilder(helper().toString(), "capture-system", output.toString())
+                .redirectError(ProcessBuilder.Redirect.DISCARD).start();
+    }
+
     static void recover(Path output) throws IOException, InterruptedException {
         Process repair = new ProcessBuilder(helper().toString(), "recover", output.toString())
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD)

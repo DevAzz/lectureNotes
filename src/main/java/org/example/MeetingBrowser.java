@@ -16,7 +16,6 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -26,27 +25,22 @@ final class MeetingBrowser implements AutoCloseable {
     private final BrowserContext context;
     private final Page page;
     private final Path profile;
-    private final URI origin;
     private final ProcessHandle process;
 
     private MeetingBrowser(Playwright playwright, BrowserContext context, Page page, Path profile,
-                           URI origin, ProcessHandle process) {
+                           ProcessHandle process) {
         this.playwright = playwright;
         this.context = context;
         this.page = page;
         this.profile = profile;
-        this.origin = origin;
         this.process = process;
     }
 
     static URI invitation(String link) {
         URI uri = URI.create(link.strip());
-        String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
-        if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getUserInfo() != null
-                || (uri.getPort() != -1 && uri.getPort() != 443)
-                || !(host.equals("salutejazz.ru") || host.endsWith(".salutejazz.ru")
-                     || host.equals("jazz.sber.ru"))) {
-            throw new IllegalArgumentException("Введите HTTPS-ссылку на встречу в SaluteJazz.");
+        if (!("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme()))
+                || uri.getRawAuthority() == null || uri.getRawAuthority().isBlank()) {
+            throw new IllegalArgumentException("Введите ссылку на страницу (http:// или https://).");
         }
         return uri;
     }
@@ -72,10 +66,10 @@ final class MeetingBrowser implements AutoCloseable {
             ProcessHandle process = captureTarget(context, executable, profile, launching);
             Page page = context.pages().isEmpty() ? context.newPage() : context.pages().getFirst();
             page.setDefaultTimeout(1_000);
-            var session = new MeetingBrowser(playwright, context, page, profile, invitation, process);
+            var session = new MeetingBrowser(playwright, context, page, profile, process);
             // Navigation travels over Playwright's pipe. The invitation never enters Chrome's command line.
             try {
-                page.navigate(invitation.toASCIIString(), new Page.NavigateOptions()
+                page.navigate(invitation.toString(), new Page.NavigateOptions()
                         .setWaitUntil(WaitUntilState.COMMIT).setTimeout(15_000));
             } catch (PlaywrightException error) {
                 if (!process.isAlive() || page.isClosed()) throw new IOException("Chrome закрылся при открытии встречи.");
@@ -105,19 +99,6 @@ final class MeetingBrowser implements AutoCloseable {
     static Playwright startDriver() {
         return Playwright.create(new Playwright.CreateOptions().setEnv(Map.of(
                 "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD", "1", "DEBUG", "", "PWDEBUG", "0")));
-    }
-
-    SaluteJazzPage.State observe() {
-        if (!process.isAlive()) return SaluteJazzPage.State.CLOSED;
-        try {
-            // The Java API dispatches browser events while a Playwright call is in progress.
-            page.waitForTimeout(1);
-            if (page.isClosed()) return SaluteJazzPage.State.CLOSED;
-            return SaluteJazzPage.observe(page, origin);
-        } catch (PlaywrightException error) {
-            return page.isClosed() || !process.isAlive()
-                    ? SaluteJazzPage.State.CLOSED : SaluteJazzPage.State.AUTHENTICATING;
-        }
     }
 
     private static ProcessHandle captureTarget(BrowserContext context, Path executable, Path profile, Instant launching)
