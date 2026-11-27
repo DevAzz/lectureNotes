@@ -39,7 +39,7 @@ import java.util.concurrent.Executors;
 
 /**
  * Вкладка «Настройки»: профили моделей, движок Whisper, системный промпт и лимит конспекта,
- * папка библиотеки и сведения о сборке. Настройки хранятся в SQLite библиотеки.
+ * оформление, папка библиотеки и сведения о сборке.
  */
 final class SettingsPanel extends VBox {
     private static final List<String> WHISPER_LANGUAGES = List.of("ru", "en", "auto");
@@ -47,6 +47,7 @@ final class SettingsPanel extends VBox {
     private final Window owner;
     private final LectureLibrary library;
     private final Path data;
+    private final Path preferencesDirectory;
     private final Runnable chooseLibraryFolder;
     private final Runnable settingsSaved;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
@@ -86,15 +87,18 @@ final class SettingsPanel extends VBox {
     private final Map<TextField, StringProperty> savedPaths = new HashMap<>();
     private boolean writing;
     private boolean closed;
+    private AppTheme theme;
 
-    SettingsPanel(Window owner, LectureLibrary library, Path data, Runnable chooseLibraryFolder,
+    SettingsPanel(Window owner, LectureLibrary library, Path data, Path preferencesDirectory, Runnable chooseLibraryFolder,
                   Runnable settingsSaved) {
         super(12);
         this.owner = owner;
         this.library = library;
         this.data = data;
+        this.preferencesDirectory = preferencesDirectory;
         this.chooseLibraryFolder = chooseLibraryFolder;
         this.settingsSaved = settingsSaved;
+        theme = AppTheme.load(preferencesDirectory);
         setPadding(new Insets(14));
 
         profiles.setId("profile-list");
@@ -184,6 +188,7 @@ final class SettingsPanel extends VBox {
         diarizationForm.add(resetModels, 1, 2);
 
         var body = new VBox(12,
+                appearanceCard(),
                 card("Модели и профили генерации",
                         profiles,
                         new HBox(8, addProfile, editProfile, removeProfile, primaryProfile, testProfile),
@@ -206,6 +211,37 @@ final class SettingsPanel extends VBox {
         VBox.setVgrow(scroll, Priority.ALWAYS);
         getChildren().add(scroll);
         updateButtons();
+    }
+
+    AppTheme theme() {
+        return theme;
+    }
+
+    private VBox appearanceCard() {
+        var choices = new ComboBox<AppTheme>();
+        choices.setId("appearance-theme");
+        choices.getItems().setAll(AppTheme.values());
+        choices.setValue(theme);
+        var label = new Label("Тема приложения");
+        label.setLabelFor(choices);
+        var row = new HBox(12, label, choices);
+        row.setAlignment(Pos.CENTER_LEFT);
+        var themeStatus = status();
+        choices.setOnAction(event -> {
+            AppTheme selected = choices.getValue();
+            if (selected == null || selected == theme || closed) return;
+            try {
+                selected.save(preferencesDirectory);
+            } catch (IOException error) {
+                choices.setValue(theme);
+                say(themeStatus, "Не удалось сохранить тему приложения.");
+                return;
+            }
+            theme = selected;
+            theme.applyTo(getScene().getStylesheets());
+            say(themeStatus, "");
+        });
+        return card("Внешний вид", row, themeStatus);
     }
 
     void initialize() {

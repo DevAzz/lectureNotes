@@ -84,7 +84,7 @@ final class DesktopWindow {
                 this::showSubjectsTab, taskBar);
         subjectsPanel = new SubjectsPanel(stage, library, this::showSubjectInLibrary, this::openLectureInLibrary,
                 () -> libraryPanel.refresh(true, null));
-        settingsPanel = new SettingsPanel(stage, library, data, this::chooseLibraryFolder,
+        settingsPanel = new SettingsPanel(stage, library, data, location.defaultDirectory(), this::chooseLibraryFolder,
                 () -> libraryPanel.reloadSettings());
         meetingTab = new Tab("Лекция", meetingPanel());
         libraryTab = new Tab("Библиотека", libraryPanel);
@@ -101,8 +101,7 @@ final class DesktopWindow {
         var root = new VBox(sections, taskBar);
         VBox.setVgrow(sections, Priority.ALWAYS);
         var scene = new Scene(root, 1080, 640);
-        var stylesheet = DesktopWindow.class.getResource("/app.css");
-        if (stylesheet != null) scene.getStylesheets().add(stylesheet.toExternalForm());
+        settingsPanel.theme().applyTo(scene.getStylesheets());
         stage.setScene(scene);
         stage.setMinWidth(980);
         stage.setMinHeight(520);

@@ -74,6 +74,9 @@ final class DesktopDialogs {
         dialog.initOwner(owner);
         dialog.setTitle(title);
         dialog.setHeaderText(null);
+        var scene = owner == null ? null : owner.getScene();
+        var theme = scene == null ? AppTheme.DARK : AppTheme.from(scene.getStylesheets());
+        theme.applyTo(dialog.getDialogPane().getStylesheets());
     }
 
     /**

@@ -12,6 +12,8 @@ import javafx.scene.control.ListView;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.layout.Region;
+import javafx.scene.paint.Color;
 import javafx.stage.Stage;
 
 import java.nio.file.Files;
@@ -57,8 +59,9 @@ public final class LibraryTabsCheck {
             System.setErr(new java.io.PrintStream(captured, true, java.nio.charset.StandardCharsets.UTF_8));
             try {
                 subjectsChecks(library);
-                settingsChecks(library);
-                taskBarChecks(work.resolve("tasks"));
+                var preferences = work.resolve("preferences");
+                settingsChecks(library, preferences);
+                taskBarChecks(work.resolve("tasks"), new LibraryLocation(preferences));
             } catch (Throwable error) {
                 System.setErr(previous);
                 error.addSuppressed(new AssertionError("JavaFX log:\n"
@@ -74,19 +77,27 @@ public final class LibraryTabsCheck {
         System.out.flush();
     }
 
-    private static void taskBarChecks(Path work) throws Exception {
+    private static void taskBarChecks(Path work, LibraryLocation location) throws Exception {
         var library = new LectureLibrary(work);
         var lecture = library.lecture(library.createLecture("История", "Реформы", "", ""));
         String markdown = "Первый абзац.\n\n".repeat(90) + "Говорим о **производной** функции.";
         library.saveNote(lecture.id(), null, markdown, false);
         var window = new AtomicReference<Stage>();
         fx(() -> {
-            new DesktopWindow(work, library, new LibraryLocation(work)).show();
+            new DesktopWindow(work, library, location).show();
             var stage = (Stage) Stage.getWindows().getLast();
             window.set(stage);
             var root = stage.getScene().getRoot();
             var bar = (DocumentTaskBar) root.lookup(".document-task-bar");
             var sections = (TabPane) root.lookup(".tab-pane");
+            require(!darkBackground((Region) root), "a new window with another library uses the saved light theme");
+            sections.getSelectionModel().select(3);
+            root.applyCss();
+            var themes = themeChoices(root);
+            require(themes.getValue() == AppTheme.LIGHT, "saved light theme is selected");
+            themes.setValue(AppTheme.DARK);
+            require(darkBackground((Region) root), "switch back to dark theme in the same window");
+            require(AppTheme.load(location.defaultDirectory()) == AppTheme.DARK, "dark theme is saved");
             require(!bar.isManaged(), "empty task bar takes no space");
             bar.start(lecture, DocumentTaskBar.Operation.NOTE);
             sections.getSelectionModel().select(2);
@@ -213,20 +224,22 @@ public final class LibraryTabsCheck {
         });
     }
 
-    private static void settingsChecks(LectureLibrary library) throws Exception {
+    private static void settingsChecks(LectureLibrary library, Path preferences) throws Exception {
         fx(() -> {
-            settingsPanel = new SettingsPanel(new Stage(), library, Path.of("C:/library-check"), () -> { }, () -> { });
             var stage = new Stage();
+            settingsPanel = new SettingsPanel(stage, library, Path.of("C:/library-check"), preferences,
+                    () -> { }, () -> { });
             var scene = new Scene(settingsPanel, 1100, 900);
-            scene.getStylesheets().add(stylesheet());
+            settingsPanel.theme().applyTo(scene.getStylesheets());
             stage.setScene(scene);
             stage.show();
             settingsPanel.initialize();
         });
-        require(settingsPanel.lookupAll(".settings-card").size() == 6, "six settings cards");
+        require(settingsPanel.lookupAll(".settings-card").size() == 7, "seven settings cards");
         var captions = new StringBuilder();
         for (var node : settingsPanel.lookupAll(".settings-title")) captions.append(((Label) node).getText()).append(' ');
-        require(captions.toString().contains("Модели и профили генерации")
+        require(captions.toString().contains("Внешний вид")
+                && captions.toString().contains("Модели и профили генерации")
                 && captions.toString().contains("Распознавание речи")
                 && captions.toString().contains("Конспект")
                 && captions.toString().contains("Библиотека"), "settings cards: " + captions);
@@ -254,9 +267,28 @@ public final class LibraryTabsCheck {
             return text.contains("3 лекций") && text.contains("JDK ") && text.contains("whisper-cli.exe");
         }, "library counters and build information");
         fx(() -> {
+            var themes = themeChoices(settingsPanel);
+            require(themes.getValue() == AppTheme.DARK && darkBackground(settingsPanel), "dark theme is the default");
+            themes.setValue(AppTheme.LIGHT);
+            require(!darkBackground(settingsPanel), "theme changes in the open window");
+            var themeLabel = settingsPanel.lookupAll(".label").stream()
+                    .filter(node -> node instanceof Label label && label.getLabelFor() == themes)
+                    .map(Label.class::cast).findFirst().orElseThrow();
+            require(((Color) themeLabel.getTextFill()).getBrightness() < 0.5, "light theme label is readable");
+            require(AppTheme.load(preferences) == AppTheme.LIGHT, "light theme is saved");
             ((Stage) settingsPanel.getScene().getWindow()).close();
             settingsPanel.close();
         });
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ComboBox<AppTheme> themeChoices(Node root) {
+        return (ComboBox<AppTheme>) root.lookup("#appearance-theme");
+    }
+
+    private static boolean darkBackground(Region region) {
+        region.applyCss();
+        return ((Color) region.getBackground().getFills().getFirst().getFill()).getBrightness() < 0.5;
     }
 
     private static Node node(String id) {

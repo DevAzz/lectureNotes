@@ -32,7 +32,7 @@ public class Main {
             library = new LectureLibrary(directory);
         } catch (Exception error) {
             String message = error instanceof java.io.IOException ? error.getMessage() : "Не удалось открыть библиотеку.";
-            Platform.startup(() -> Platform.runLater(() -> showError(message)));
+            Platform.startup(() -> Platform.runLater(() -> showError(message, location)));
             return;
         }
         try {
@@ -41,7 +41,7 @@ public class Main {
                     new DesktopWindow(directory, library, location).show();
                 } catch (RuntimeException error) {
                     try { library.close(); } catch (Exception failure) { error.addSuppressed(failure); }
-                    showError("Не удалось открыть окно приложения.");
+                    showError("Не удалось открыть окно приложения.", location);
                 }
             }));
         } catch (RuntimeException | Error error) {
@@ -50,10 +50,11 @@ public class Main {
         }
     }
 
-    private static void showError(String message) {
+    private static void showError(String message, LibraryLocation location) {
         var alert = new Alert(Alert.AlertType.ERROR, message);
         alert.setTitle("Конспекты лекций");
         alert.setHeaderText(null);
+        AppTheme.load(location.defaultDirectory()).applyTo(alert.getDialogPane().getStylesheets());
         alert.showAndWait();
         Platform.exit();
     }

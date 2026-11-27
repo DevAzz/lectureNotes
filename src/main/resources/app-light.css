@@ -1,0 +1,23 @@
+.root {
+    -canvas: #f5f7fb;
+    -panel: #ffffff;
+    -well: #fbfcfe;
+    -control: #eaf0f7;
+    -control-hover: #e0e9f5;
+    -control-pressed: #d2dff0;
+    -line: #d2dcea;
+    -ink: #1c2430;
+    -ink-soft: #4d5a6b;
+    -ink-faint: #5f6f85;
+    -heading: #10233f;
+    -accent: #245fbd;
+    -primary: #2057a5;
+    -on-primary: #ffffff;
+    -selection: #cfe2fb;
+    -selection-muted: #e0ebfc;
+    -success: #0f6b56;
+    -warning: #925013;
+    -code: #9d2f4f;
+    -search-mark: rgba(255, 183, 34, 0.48);
+    -shadow: #1c243033;
+}
