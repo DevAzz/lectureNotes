@@ -6,6 +6,7 @@ import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
@@ -23,9 +24,23 @@ import java.util.UUID;
 
 final class LectureLibrary implements AutoCloseable {
     static final int DEFAULT_NOTE_TIME_LIMIT_MINUTES = 60;
-    record Subject(long id, String name, String description) {
+    static final String DEFAULT_WHISPER_LANGUAGE = "ru";
+
+    record Subject(long id, String name, String description, int lectures, int notes, int transcripts) {
         @Override public String toString() { return name; }
     }
+
+    record Profile(long id, String name, String baseUrl, String modelId, boolean cloud, int contextTokens,
+                   int answerTokens, int timeoutSeconds, boolean isDefault, boolean hasSecret) {
+        @Override public String toString() { return name; }
+
+        LocalProcessing.Llm llm(String secret) {
+            return new LocalProcessing.Llm(baseUrl, modelId, secret == null ? "" : secret, answerTokens,
+                    timeoutSeconds, cloud);
+        }
+    }
+
+    record Stats(int subjects, int lectures, int transcripts, int notes, int pendingCleanup) { }
 
     record Lecture(String id, long subjectId, String subject, String title, String topic,
                    String focus, Instant created, String state, boolean hasNote, boolean audioRemoved) {
@@ -103,20 +118,34 @@ final class LectureLibrary implements AutoCloseable {
             rows.next();
             version = rows.getInt(1);
         }
-        if (version == 5) return;
-        if (version < 0 || version > 5) throw new IOException("Библиотека создана более новой версией приложения.");
+        if (version == 6) return;
+        if (version < 0 || version > 6) throw new IOException("Библиотека создана более новой версией приложения.");
         transaction(() -> {
             try (var statement = db.createStatement()) {
                 if (version == 0) for (String sql : LibrarySchema.V1) statement.execute(sql);
                 if (version < 2) statement.execute(LibrarySchema.V2);
                 if (version < 3) for (String sql : LibrarySchema.V3) statement.execute(sql);
                 if (version < 4) for (String sql : LibrarySchema.V4) statement.execute(sql);
-                for (String sql : LibrarySchema.V5) statement.execute(sql);
+                if (version < 5) for (String sql : LibrarySchema.V5) statement.execute(sql);
+                if (version < 6) for (String sql : LibrarySchema.V6) statement.execute(sql);
                 if (version == 0) importPrototype();
-                statement.execute("PRAGMA user_version = 5");
+                statement.execute("PRAGMA user_version = 6");
             }
+            if (version < 6) seedDefaultProfile();
             return null;
         });
+    }
+
+    /** Пользователь ещё не создавал профилей — предлагаем тот же локальный API, что и раньше. */
+    private void seedDefaultProfile() throws SQLException {
+        try (var rows = db.createStatement().executeQuery("SELECT COUNT(*) FROM model_profile")) {
+            if (rows.next() && rows.getInt(1) > 0) return;
+        }
+        update("""
+                INSERT INTO model_profile(name, name_key, base_url, model_id, timeout_seconds, is_default)
+                VALUES (?,?,?,?,?,1)
+                """, "Локальная модель", RussianSearch.normalize("Локальная модель"),
+                "http://127.0.0.1:47831/v1", "iq3_s", 900);
     }
 
     private void importPrototype() throws IOException, SQLException {
@@ -170,15 +199,34 @@ final class LectureLibrary implements AutoCloseable {
 
     synchronized List<Subject> subjects() throws SQLException {
         var result = new ArrayList<Subject>();
-        try (var sql = prepare("SELECT id, name, description FROM subject ORDER BY name_key, id");
-             var rows = sql.executeQuery()) {
-            while (rows.next()) result.add(new Subject(rows.getLong(1), rows.getString(2), rows.getString(3)));
+        try (var sql = prepare("""
+                SELECT s.id, s.name, s.description,
+                       (SELECT COUNT(*) FROM lecture l WHERE l.subject_id=s.id),
+                       (SELECT COUNT(*) FROM lecture l WHERE l.subject_id=s.id AND l.current_note IS NOT NULL),
+                       (SELECT COUNT(*) FROM lecture l WHERE l.subject_id=s.id AND l.current_transcript IS NOT NULL)
+                FROM subject s ORDER BY name_key, id
+                """); var rows = sql.executeQuery()) {
+            while (rows.next()) {
+                result.add(new Subject(rows.getLong(1), rows.getString(2), rows.getString(3),
+                        rows.getInt(4), rows.getInt(5), rows.getInt(6)));
+            }
         }
         return result;
     }
 
-    synchronized void saveSubject(Long id, String name, String description) throws SQLException, IOException {
+    synchronized List<Lecture> subjectLectures(long subjectId) throws SQLException {
+        var result = new ArrayList<Lecture>();
+        try (var sql = prepare("SELECT " + LECTURE_COLUMNS + " FROM lecture l JOIN subject s ON s.id=l.subject_id"
+                + " WHERE l.subject_id=? ORDER BY l.created_at DESC, l.id", subjectId);
+             var rows = sql.executeQuery()) {
+            while (rows.next()) result.add(readLecture(rows));
+        }
+        return result;
+    }
+
+    synchronized long saveSubject(Long id, String name, String description) throws SQLException, IOException {
         name = required(name, "Введите название предмета.");
+        if (name.length() > 120) throw new IOException("Название предмета слишком длинное.");
         String key = RussianSearch.normalize(name);
         try (var sql = prepare("SELECT id FROM subject WHERE name_key=?", key); var rows = sql.executeQuery()) {
             if (rows.next() && (id == null || rows.getLong(1) != id)) {
@@ -186,17 +234,39 @@ final class LectureLibrary implements AutoCloseable {
             }
         }
         if (id == null) {
-            update("INSERT INTO subject(name, name_key, description) VALUES (?,?,?)", name, key, description.strip());
-        } else {
-            update("UPDATE subject SET name=?, name_key=?, description=? WHERE id=?", name, key, description.strip(), id);
+            return insert("INSERT INTO subject(name, name_key, description) VALUES (?,?,?) RETURNING id",
+                    name, key, description.strip());
         }
+        if (update("UPDATE subject SET name=?, name_key=?, description=? WHERE id=?",
+                name, key, description.strip(), id) != 1) throw new IOException("Предмет не найден.");
+        return id;
     }
 
     synchronized void deleteSubject(long id) throws SQLException, IOException {
-        try (var sql = prepare("SELECT id FROM lecture WHERE subject_id=? LIMIT 1", id); var rows = sql.executeQuery()) {
-            if (rows.next()) throw new IOException("Сначала перенесите или удалите лекции этого предмета.");
+        try (var sql = prepare("SELECT COUNT(*) FROM lecture WHERE subject_id=?", id); var rows = sql.executeQuery()) {
+            rows.next();
+            if (rows.getInt(1) > 0) {
+                throw new IOException("Сначала перенесите или удалите лекции этого предмета (" + rows.getInt(1) + ").");
+            }
         }
-        update("DELETE FROM subject WHERE id=?", id);
+        if (update("DELETE FROM subject WHERE id=?", id) != 1) throw new IOException("Предмет не найден.");
+    }
+
+    /** Переносит все лекции предмета и возвращает число перенесённых карточек. */
+    synchronized int moveSubjectLectures(long from, long to) throws SQLException, IOException {
+        if (from == to) throw new IOException("Выберите другой предмет.");
+        try (var sql = prepare("SELECT COUNT(DISTINCT id) FROM subject WHERE id IN (?,?)", from, to);
+             var rows = sql.executeQuery()) {
+            rows.next();
+            if (rows.getInt(1) != 2) throw new IOException("Предмет не найден.");
+        }
+        return update("UPDATE lecture SET subject_id=? WHERE subject_id=?", to, from);
+    }
+
+    synchronized void moveLecture(String id, long subjectId) throws SQLException, IOException {
+        if (update("""
+                UPDATE lecture SET subject_id=? WHERE id=? AND subject_id<>? AND state NOT IN ('RECORDING','STOPPING')
+                """, subjectId, id, subjectId) != 1) throw new IOException("Лекция уже в этом предмете или недоступна.");
     }
 
     private long ensureSubject(String name) throws SQLException {
@@ -495,19 +565,28 @@ final class LectureLibrary implements AutoCloseable {
         }
     }
 
-    synchronized String noteSystemPrompt() throws SQLException {
-        try (var sql = prepare("SELECT value FROM app_setting WHERE name='note_system_prompt'");
-             var rows = sql.executeQuery()) {
-            return rows.next() ? rows.getString(1) : LocalProcessing.DEFAULT_SYSTEM_PROMPT;
+    synchronized String setting(String name, String fallback) throws SQLException {
+        try (var sql = prepare("SELECT value FROM app_setting WHERE name=?", name); var rows = sql.executeQuery()) {
+            if (!rows.next()) return fallback;
+            String saved = rows.getString(1);
+            return saved == null || saved.isBlank() ? fallback : saved;
         }
+    }
+
+    synchronized void saveSetting(String name, String value) throws SQLException {
+        update("""
+                INSERT INTO app_setting(name, value) VALUES (?,?)
+                ON CONFLICT(name) DO UPDATE SET value=excluded.value
+                """, name, value);
+    }
+
+    synchronized String noteSystemPrompt() throws SQLException {
+        return setting("note_system_prompt", LocalProcessing.DEFAULT_SYSTEM_PROMPT);
     }
 
     synchronized void saveNoteSystemPrompt(String prompt) throws SQLException, IOException {
         if (prompt.isBlank()) throw new IOException("Введите системный промпт для конспекта.");
-        update("""
-                INSERT INTO app_setting(name, value) VALUES ('note_system_prompt', ?)
-                ON CONFLICT(name) DO UPDATE SET value=excluded.value
-                """, prompt);
+        saveSetting("note_system_prompt", prompt.strip());
     }
 
     synchronized int noteTimeLimitMinutes() throws SQLException {
@@ -525,12 +604,163 @@ final class LectureLibrary implements AutoCloseable {
         if (minutes <= 0) throw new IOException("Укажите время формирования конспекта в минутах.");
         transaction(() -> {
             saveNoteSystemPrompt(prompt);
-            update("""
-                    INSERT INTO app_setting(name, value) VALUES ('note_time_limit_minutes', ?)
-                    ON CONFLICT(name) DO UPDATE SET value=excluded.value
-                    """, Integer.toString(minutes));
+            saveSetting("note_time_limit_minutes", Integer.toString(minutes));
             return null;
         });
+    }
+
+    synchronized List<Profile> profiles() throws SQLException {
+        var result = new ArrayList<Profile>();
+        try (var sql = prepare("""
+                SELECT id, name, base_url, model_id, cloud, context_tokens, answer_tokens, timeout_seconds,
+                       is_default, secret_dpapi IS NOT NULL
+                FROM model_profile ORDER BY is_default DESC, name_key, id
+                """); var rows = sql.executeQuery()) {
+            while (rows.next()) {
+                result.add(new Profile(rows.getLong(1), rows.getString(2), rows.getString(3), rows.getString(4),
+                        rows.getInt(5) != 0, rows.getInt(6), rows.getInt(7), rows.getInt(8),
+                        rows.getInt(9) != 0, rows.getInt(10) != 0));
+            }
+        }
+        return result;
+    }
+
+    synchronized byte[] profileSecret(long id) throws SQLException {
+        try (var sql = prepare("SELECT secret_dpapi FROM model_profile WHERE id=?", id); var rows = sql.executeQuery()) {
+            return rows.next() ? rows.getBytes(1) : null;
+        }
+    }
+
+    /** Сохраняет профиль. Секрет передаётся уже защищённым DPAPI, пустое значение очищает его. */
+    synchronized long saveProfile(Long id, String name, String baseUrl, String modelId, boolean cloud,
+                                  int contextTokens, int answerTokens, int timeoutSeconds,
+                                  byte[] secret, boolean makeDefault) throws SQLException, IOException {
+        String title = required(name, "Введите название профиля.");
+        if (title.length() > 120) throw new IOException("Название профиля слишком длинное.");
+        String model = required(modelId, "Укажите ID модели.");
+        if (contextTokens <= 0) throw new IOException("Бюджет контекста должен быть положительным.");
+        if (answerTokens < 0) throw new IOException("Лимит ответа не может быть отрицательным.");
+        if (timeoutSeconds <= 0) throw new IOException("Тайм-аут запроса должен быть положительным.");
+        String address = baseUrl == null ? "" : baseUrl.strip();
+        LocalProcessing.endpoint(new LocalProcessing.Llm(address, model, "", answerTokens, timeoutSeconds, cloud));
+        String key = RussianSearch.normalize(title);
+        try (var sql = prepare("SELECT id FROM model_profile WHERE name_key=?", key); var rows = sql.executeQuery()) {
+            if (rows.next() && (id == null || rows.getLong(1) != id)) {
+                throw new IOException("Профиль с таким названием уже существует.");
+            }
+        }
+        return transaction(() -> {
+            long saved = id == null
+                    ? insert("""
+                        INSERT INTO model_profile(name, name_key, base_url, model_id, secret_dpapi, context_tokens,
+                            answer_tokens, timeout_seconds, cloud)
+                        VALUES (?,?,?,?,?,?,?,?,?) RETURNING id
+                        """, title, key, address, model, secret, contextTokens, answerTokens, timeoutSeconds,
+                        cloud ? 1 : 0)
+                    : insert("""
+                        UPDATE model_profile SET name=?, name_key=?, base_url=?, model_id=?, secret_dpapi=?,
+                            context_tokens=?, answer_tokens=?, timeout_seconds=?, cloud=? WHERE id=? RETURNING id
+                        """, title, key, address, model, secret, contextTokens, answerTokens, timeoutSeconds,
+                        cloud ? 1 : 0, id);
+            if (makeDefault) promoteProfile(saved);
+            ensureProfileDefault();
+            return saved;
+        });
+    }
+
+    synchronized void setDefaultProfile(long id) throws SQLException, IOException {
+        transaction(() -> {
+            promoteProfile(id);
+            return null;
+        });
+    }
+
+    synchronized void deleteProfile(long id) throws SQLException, IOException {
+        transaction(() -> {
+            if (update("DELETE FROM model_profile WHERE id=?", id) != 1) throw new IOException("Профиль не найден.");
+            ensureProfileDefault();
+            return null;
+        });
+    }
+
+    private void promoteProfile(long id) throws SQLException, IOException {
+        update("UPDATE model_profile SET is_default=0 WHERE id<>?", id);
+        if (update("UPDATE model_profile SET is_default=1 WHERE id=?", id) != 1) {
+            throw new IOException("Профиль не найден.");
+        }
+    }
+
+    /** Один профиль всегда остаётся основным, пока в таблице есть хотя бы одна строка. */
+    private void ensureProfileDefault() throws SQLException {
+        try (var rows = db.createStatement().executeQuery("SELECT COUNT(*) FROM model_profile")) {
+            rows.next();
+            if (rows.getInt(1) == 0) return;
+        }
+        try (var rows = db.createStatement().executeQuery("SELECT COUNT(*) FROM model_profile WHERE is_default=1")) {
+            rows.next();
+            if (rows.getInt(1) > 0) return;
+        }
+        try (var rows = db.createStatement().executeQuery("SELECT id FROM model_profile ORDER BY name_key, id LIMIT 1")) {
+            if (rows.next()) update("UPDATE model_profile SET is_default=1 WHERE id=?", rows.getLong(1));
+        }
+    }
+
+    synchronized LocalProcessing.Whisper whisperSettings() throws SQLException {
+        var bundled = LocalProcessing.bundledWhisper(false);
+        if (!bundled.available()) bundled = LocalProcessing.bundledWhisper(true);
+        Path executable = configuredPath("whisper_executable", "LECTURENOTES_WHISPER", bundled.executable());
+        Path model = configuredPath("whisper_model", "LECTURENOTES_WHISPER_MODEL", bundled.model());
+        boolean cpu = Boolean.parseBoolean(setting("whisper_cpu", Boolean.toString(bundled.cpu())));
+        return new LocalProcessing.Whisper(executable, model, cpu, whisperLanguage());
+    }
+
+    synchronized String whisperLanguage() throws SQLException {
+        return setting("whisper_language", DEFAULT_WHISPER_LANGUAGE);
+    }
+
+    synchronized void saveWhisperSettings(Path executable, Path model, boolean cpu, String language)
+            throws SQLException, IOException {
+        if (executable == null || model == null) throw new IOException("Укажите файлы whisper-cli.exe и модели.");
+        if (language == null || language.isBlank()) throw new IOException("Укажите язык распознавания или auto.");
+        if (!Files.isRegularFile(executable) || !Files.isRegularFile(model)) {
+            throw new IOException("Файлы движка или модели не найдены.");
+        }
+        transaction(() -> {
+            saveSetting("whisper_executable", executable.toAbsolutePath().normalize().toString());
+            saveSetting("whisper_model", model.toAbsolutePath().normalize().toString());
+            saveSetting("whisper_cpu", Boolean.toString(cpu));
+            saveSetting("whisper_language", language.strip().toLowerCase(java.util.Locale.ROOT));
+            return null;
+        });
+    }
+
+    /** Настройки движка из библиотеки важнее переменных окружения, а переменные — встроенной поставки. */
+    private Path configuredPath(String key, String variable, Path fallback) throws SQLException {
+        String saved = setting(key, null);
+        if (saved != null) return path(saved, fallback);
+        String fromEnvironment = System.getenv(variable);
+        if (fromEnvironment != null && !fromEnvironment.isBlank()) return path(fromEnvironment, fallback);
+        return fallback;
+    }
+
+    private static Path path(String value, Path fallback) {
+        try { return Path.of(value.strip()).toAbsolutePath().normalize(); }
+        catch (InvalidPathException error) { return fallback; }
+    }
+
+    synchronized Stats stats() throws SQLException {
+        int subjects = count("SELECT COUNT(*) FROM subject");
+        int lectures = count("SELECT COUNT(*) FROM lecture");
+        int transcripts = count("SELECT COUNT(*) FROM lecture WHERE current_transcript IS NOT NULL");
+        int notes = count("SELECT COUNT(*) FROM lecture WHERE current_note IS NOT NULL");
+        int cleanup = count("SELECT (SELECT COUNT(*) FROM file_cleanup) + (SELECT COUNT(*) FROM audio_cleanup)");
+        return new Stats(subjects, lectures, transcripts, notes, cleanup);
+    }
+
+    private int count(String sql) throws SQLException {
+        try (var rows = db.createStatement().executeQuery(sql)) {
+            return rows.next() ? rows.getInt(1) : 0;
+        }
     }
 
     synchronized void appendLiveSegments(String id, List<LocalProcessing.Segment> segments)

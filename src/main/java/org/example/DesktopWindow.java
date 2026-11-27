@@ -4,6 +4,7 @@ import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.Tab;
@@ -39,7 +40,7 @@ final class DesktopWindow {
     private final LectureLibrary library;
     private final LibraryLocation location;
     private final ScheduledExecutorService workers = Executors.newSingleThreadScheduledExecutor();
-    private final TextField subject = new TextField();
+    private final ComboBox<String> subject = new ComboBox<>();
     private final TextField title = new TextField();
     private final TextField topic = new TextField();
     private final TextField focus = new TextField();
@@ -56,7 +57,12 @@ final class DesktopWindow {
     private final TextArea liveText = new TextArea();
     private final TabPane sections = new TabPane();
     private final Tab meetingTab;
+    private final Tab libraryTab;
+    private final Tab subjectsTab;
+    private final Tab settingsTab;
     private final LibraryPanel libraryPanel;
+    private final SubjectsPanel subjectsPanel;
+    private final SettingsPanel settingsPanel;
     private MeetingBrowser browser;
     private ScheduledFuture<?> browserWatch;
     private State browserState = State.WAITING_USER;
@@ -79,10 +85,22 @@ final class DesktopWindow {
         this.library = library;
         this.location = location;
         libraryPanel = new LibraryPanel(stage, library, this::loadDraft, this::reserved, this::onLectureDeleted,
-                this::chooseLibraryFolder);
+                this::chooseLibraryFolder, this::showSubjectsTab);
+        subjectsPanel = new SubjectsPanel(stage, library, this::showSubjectInLibrary, this::openLectureInLibrary,
+                () -> libraryPanel.refresh(true, null));
+        settingsPanel = new SettingsPanel(stage, library, data, this::chooseLibraryFolder,
+                () -> libraryPanel.reloadSettings());
         meetingTab = new Tab("Лекция", meetingPanel());
-        sections.getTabs().addAll(meetingTab, new Tab("Библиотека", libraryPanel));
+        libraryTab = new Tab("Библиотека", libraryPanel);
+        subjectsTab = new Tab("Предметы", subjectsPanel);
+        settingsTab = new Tab("Настройки", settingsPanel);
+        sections.getTabs().addAll(meetingTab, libraryTab, subjectsTab, settingsTab);
         sections.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
+        sections.getSelectionModel().selectedItemProperty().addListener((obs, prior, current) -> {
+            if (current == subjectsTab) subjectsPanel.refresh();
+            if (current == settingsTab) settingsPanel.load();
+            if (current == meetingTab) reloadSubjects();
+        });
         stage.setTitle("Конспекты лекций");
         var scene = new Scene(sections, 1080, 640);
         var stylesheet = DesktopWindow.class.getResource("/app.css");
@@ -100,6 +118,45 @@ final class DesktopWindow {
     void show() {
         stage.show();
         libraryPanel.initialize();
+        subjectsPanel.initialize();
+        settingsPanel.initialize();
+        reloadSubjects();
+    }
+
+    /** Список предметов общий для всех вкладок: форма лекции предлагает уже созданные названия. */
+    private void reloadSubjects() {
+        if (closing) return;
+        workers.execute(() -> {
+            try {
+                var names = library.subjects().stream().map(LectureLibrary.Subject::name).toList();
+                Platform.runLater(() -> {
+                    if (closed()) return;
+                    String chosen = subjectValue();
+                    subject.getItems().setAll(names);
+                    subject.setValue(chosen.isBlank() ? null : chosen);
+                });
+            } catch (Exception ignored) {
+                // Форма лекции остаётся с прежним списком, если библиотека недоступна.
+            }
+        });
+    }
+
+    private boolean closed() {
+        return closeStarted;
+    }
+
+    private void showSubjectsTab() {
+        sections.getSelectionModel().select(subjectsTab);
+    }
+
+    private void showSubjectInLibrary(long subjectId) {
+        sections.getSelectionModel().select(libraryTab);
+        libraryPanel.showSubject(subjectId);
+    }
+
+    private void openLectureInLibrary(String id) {
+        sections.getSelectionModel().select(libraryTab);
+        libraryPanel.refresh(true, id);
     }
 
     private void chooseLibraryFolder() {
@@ -125,6 +182,9 @@ final class DesktopWindow {
         var form = new GridPane();
         form.setHgap(12);
         form.setVgap(10);
+        subject.setEditable(true);
+        subject.setPromptText("Название предмета");
+        subject.setAccessibleText("Предмет");
         DesktopDialogs.field(form, 0, "Предмет", subject);
         DesktopDialogs.field(form, 1, "Название", title);
         DesktopDialogs.field(form, 2, "Тема", topic);
@@ -174,7 +234,7 @@ final class DesktopWindow {
             return;
         }
         draftId = item.id();
-        subject.setText(item.subject());
+        subject.setValue(item.subject());
         title.setText(item.title());
         topic.setText(item.topic());
         focus.setText(item.focus());
@@ -202,7 +262,7 @@ final class DesktopWindow {
 
     private void clearDraft() {
         draftId = null;
-        subject.clear();
+        subject.setValue(null);
         title.clear();
         topic.clear();
         focus.clear();
@@ -210,14 +270,22 @@ final class DesktopWindow {
         status.setText("Готово к подключению");
     }
 
+    /** Поле предмета можно заполнить вручную или выбрать готовый предмет из списка. */
+    private String subjectValue() {
+        String chosen = subject.getValue();
+        String typed = subject.getEditor().getText();
+        if (typed != null && !typed.isBlank()) return typed.strip();
+        return chosen == null ? "" : chosen.strip();
+    }
+
     private Draft readDraft() {
-        if (subject.getText().isBlank() || title.getText().isBlank()) {
+        if (subjectValue().isBlank() || title.getText().isBlank()) {
             notice("Введите предмет и название лекции.");
             return null;
         }
         try {
             URI link = invitation.getText().isBlank() ? null : MeetingBrowser.invitation(invitation.getText());
-            return new Draft(subject.getText(), title.getText(), topic.getText(), focus.getText(), link);
+            return new Draft(subjectValue(), title.getText(), topic.getText(), focus.getText(), link);
         } catch (IllegalArgumentException error) {
             notice("Введите HTTPS-ссылку на встречу в SaluteJazz.");
             return null;
@@ -633,6 +701,8 @@ final class DesktopWindow {
         if (closeStarted) return;
         closeStarted = true;
         libraryPanel.close();
+        subjectsPanel.close();
+        settingsPanel.close();
         workers.execute(() -> {
             try { libraryPanel.awaitClose(); }
             catch (InterruptedException error) { Thread.currentThread().interrupt(); }

@@ -41,15 +41,6 @@ final class DesktopDialogs {
         return dialog.showAndWait().orElse(ButtonType.CANCEL) == ButtonType.OK;
     }
 
-    /** Немодалное окно со списком кнопок внутри (например, окно «Предметы»). */
-    static Dialog<Void> panel(Window owner, String title, Node content, ButtonType... types) {
-        var dialog = new Dialog<Void>();
-        prepare(dialog, owner, title);
-        bound(dialog, owner, content);
-        dialog.getDialogPane().getButtonTypes().addAll(types);
-        return dialog;
-    }
-
     static String editSegment(Window owner, LocalProcessing.Segment segment) {
         var text = new TextArea(segment.text());
         text.setWrapText(true);

@@ -25,6 +25,20 @@ final class InvitationSecret {
         return new String(transform("unprotect-invitation", data), StandardCharsets.UTF_8);
     }
 
+    /** Секрет модели хранится так же, как приглашение, — только в виде DPAPI-блоба. */
+    static byte[] protectText(String secret) throws IOException, InterruptedException {
+        if (secret == null || secret.isBlank()) return null;
+        byte[] data = secret.strip().getBytes(StandardCharsets.UTF_8);
+        if (data.length > MAX_PLAINTEXT) throw new IOException("Слишком длинное секретное значение.");
+        return transform("protect-invitation", data);
+    }
+
+    static String unprotectText(byte[] data) throws IOException, InterruptedException {
+        if (data == null) return "";
+        if (data.length > MAX_BLOB) throw new IOException("Не удалось открыть сохранённый секрет.");
+        return new String(transform("unprotect-invitation", data), StandardCharsets.UTF_8);
+    }
+
     private static byte[] transform(String operation, byte[] input) throws IOException, InterruptedException {
         Process process = new ProcessBuilder(Capture.helper().toString(), operation)
                 .redirectError(ProcessBuilder.Redirect.DISCARD).start();

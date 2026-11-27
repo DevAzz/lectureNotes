@@ -72,6 +72,7 @@ final class LibraryPanel extends VBox {
     private final Button edit = new Button("Изменить карточку");
     private final Button delete = new Button("Удалить лекцию");
     private final Button subjectsButton = new Button("Предметы");
+    private final Runnable openSubjects;
     private final RecordingPlayer player;
     private final LectureDocuments documents;
     private final TabPane tabs = new TabPane();
@@ -87,13 +88,15 @@ final class LibraryPanel extends VBox {
     private boolean closed;
 
     LibraryPanel(Window owner, LectureLibrary library, Consumer<LectureLibrary.Lecture> openMeeting,
-                 Predicate<String> reserved, Consumer<String> onLectureDeleted, Runnable chooseLibraryFolder) {
+                 Predicate<String> reserved, Consumer<String> onLectureDeleted, Runnable chooseLibraryFolder,
+                 Runnable openSubjects) {
         super(10);
         this.owner = owner;
         this.library = library;
         this.openMeeting = openMeeting;
         this.reserved = reserved;
         this.onLectureDeleted = onLectureDeleted;
+        this.openSubjects = openSubjects;
         player = new RecordingPlayer(this::notice);
         documents = new LectureDocuments(owner, player, library, () -> refresh(false, null));
         documents.busyProperty().addListener((obs, prior, value) -> updateButtons());
@@ -184,7 +187,7 @@ final class LibraryPanel extends VBox {
         connect.setOnAction(event -> openMeeting.accept(shown));
         edit.setOnAction(event -> editLecture());
         delete.setOnAction(event -> deleteLecture());
-        subjectsButton.setOnAction(event -> manageSubjects());
+        subjectsButton.setOnAction(event -> openSubjects.run());
         queryDelay.setOnFinished(event -> refresh(false, null));
         query.textProperty().addListener((obs, prior, value) -> {
             queryVersion.incrementAndGet();
@@ -304,6 +307,24 @@ final class LibraryPanel extends VBox {
 
     private static <T> T value(ComboBox<Choice<T>> box) {
         return box.getValue() == null ? null : box.getValue().value();
+    }
+
+    /** Переключает библиотеку на лекции выбранного предмета. */
+    void showSubject(long subjectId) {
+        var choice = subject.getItems().stream()
+                .filter(item -> item.value() != null && item.value() == subjectId)
+                .findFirst().orElse(null);
+        if (choice == null) {
+            refresh(true, null);
+            return;
+        }
+        subject.getSelectionModel().select(choice);
+        refresh(false, null);
+    }
+
+    /** Настройки во вкладке «Настройки» меняют движок и профили этой панели. */
+    void reloadSettings() {
+        documents.reloadSettings();
     }
 
     private void applySubjects(List<LectureLibrary.Subject> current) {
@@ -497,53 +518,6 @@ final class LibraryPanel extends VBox {
                 Platform.runLater(() -> notice("Оставшиеся файлы будут очищены при следующем запуске."));
             });
         });
-    }
-
-    private void manageSubjects() {
-        var choices = new ComboBox<LectureLibrary.Subject>();
-        choices.getItems().setAll(subjects);
-        choices.getSelectionModel().selectFirst();
-        var add = new Button("Создать");
-        var editSubject = new Button("Изменить");
-        var deleteSubject = new Button("Удалить");
-        var dialog = DesktopDialogs.panel(owner, "Предметы",
-                new VBox(8, choices, new HBox(8, add, editSubject, deleteSubject)),
-                javafx.scene.control.ButtonType.CLOSE);
-        editSubject.disableProperty().bind(choices.valueProperty().isNull());
-        deleteSubject.disableProperty().bind(choices.valueProperty().isNull());
-        add.setOnAction(event -> afterClose(dialog, () -> editSubject(null)));
-        editSubject.setOnAction(event -> afterClose(dialog, () -> editSubject(choices.getValue())));
-        deleteSubject.setOnAction(event -> {
-            var item = choices.getValue();
-            afterClose(dialog, () -> {
-                if (DesktopDialogs.confirm(owner, "Удаление предмета", "Удалить предмет «" + item.name() + "»?")) {
-                    mutate(() -> library.deleteSubject(item.id()), () -> refresh(true, null));
-                }
-            });
-        });
-        dialog.showAndWait();
-    }
-
-    /**
-     * Новый диалог открывается уже после закрытия окна «Предметы»,
-     * иначе он может появиться без панели кнопок.
-     */
-    private static void afterClose(javafx.scene.control.Dialog<?> dialog, Runnable action) {
-        dialog.close();
-        Platform.runLater(action);
-    }
-
-    private void editSubject(LectureLibrary.Subject item) {
-        var name = new TextField(item == null ? "" : item.name());
-        var description = new TextField(item == null ? "" : item.description());
-        var form = DesktopDialogs.fields();
-        DesktopDialogs.field(form, 0, "Название", name);
-        DesktopDialogs.field(form, 1, "Описание", description);
-        if (!DesktopDialogs.form(owner, item == null ? "Новый предмет" : "Изменить предмет", form)) return;
-        String title = name.getText();
-        String details = description.getText();
-        mutate(() -> library.saveSubject(item == null ? null : item.id(), title, details),
-                () -> refresh(true, null));
     }
 
     @FunctionalInterface

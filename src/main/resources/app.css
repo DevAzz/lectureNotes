@@ -46,6 +46,18 @@
 
 .split-pane > .split-pane-divider { -fx-background-color: #e6ebf2; -fx-padding: 0 3 0 3; }
 
+/* Вкладки «Предметы» и «Настройки». */
+.settings-card {
+    -fx-background-color: white;
+    -fx-background-radius: 9;
+    -fx-border-color: -line;
+    -fx-border-radius: 9;
+    -fx-padding: 12 14 12 14;
+}
+.settings-title { -fx-text-fill: #10233f; -fx-font-weight: 700; -fx-font-size: 14px; }
+.scroll-pane { -fx-background-color: transparent; -fx-background: transparent; }
+.scroll-pane > .viewport { -fx-background-color: transparent; }
+
 /* Редактор конспекта. */
 .note-editor { -fx-padding: 0; }
 .note-toolbar {

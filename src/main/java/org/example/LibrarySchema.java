@@ -25,6 +25,24 @@ final class LibrarySchema {
             "ALTER TABLE transcript_segment ADD COLUMN speaker_label TEXT",
             "ALTER TABLE transcript_segment ADD COLUMN speaker_name TEXT"
     );
+    static final List<String> V6 = List.of(
+            """
+            CREATE TABLE model_profile (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                name_key TEXT NOT NULL UNIQUE,
+                base_url TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                secret_dpapi BLOB,
+                context_tokens INTEGER NOT NULL DEFAULT 8192,
+                answer_tokens INTEGER NOT NULL DEFAULT 0,
+                timeout_seconds INTEGER NOT NULL DEFAULT 900,
+                cloud INTEGER NOT NULL DEFAULT 0,
+                is_default INTEGER NOT NULL DEFAULT 0
+            )
+            """,
+            "CREATE UNIQUE INDEX model_profile_default ON model_profile(is_default) WHERE is_default=1"
+    );
 
     static final List<String> V1 = List.of(
             """

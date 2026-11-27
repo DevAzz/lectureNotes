@@ -5,7 +5,6 @@ import javafx.beans.property.ReadOnlyBooleanProperty;
 import javafx.beans.property.ReadOnlyBooleanWrapper;
 import javafx.geometry.Insets;
 import javafx.scene.control.Button;
-import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
@@ -18,7 +17,6 @@ import javafx.stage.FileChooser;
 import javafx.stage.Window;
 
 import java.io.IOException;
-import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.ZoneId;
@@ -28,7 +26,6 @@ import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 final class LectureDocuments {
@@ -46,7 +43,7 @@ final class LectureDocuments {
     private final Label status = new Label();
     private final Label noteStatus = new Label();
     private final Button recognize = new Button("Распознать");
-    private final Button whisperSettings = new Button("Настройки Whisper");
+    private final Button modelSettings = new Button("Настройки моделей");
     private final Button playLine = new Button("Прослушать реплику");
     private final Button editLine = new Button("Изменить реплику");
     private final Button diarize = new Button("Разметить спикеров");
@@ -67,9 +64,9 @@ final class LectureDocuments {
     private long selection;
     private boolean loading;
     private boolean closed;
+    private Runnable openSettings = () -> { };
+    private List<LectureLibrary.Profile> profiles = List.of();
     private LocalProcessing.Whisper whisper;
-    private String endpoint = "http://127.0.0.1:47831/v1";
-    private String model = "iq3_s";
     private String systemPrompt = LocalProcessing.DEFAULT_SYSTEM_PROMPT;
     private int noteTimeLimitMinutes = LectureLibrary.DEFAULT_NOTE_TIME_LIMIT_MINUTES;
 
@@ -78,11 +75,16 @@ final class LectureDocuments {
         this.player = player;
         this.library = library;
         this.onPublished = onPublished;
-        var bundled = LocalProcessing.bundledWhisper(false);
-        if (!bundled.available()) bundled = LocalProcessing.bundledWhisper(true);
-        Path executable = configuredPath("LECTURENOTES_WHISPER", bundled.executable());
-        Path weights = configuredPath("LECTURENOTES_WHISPER_MODEL", bundled.model());
-        whisper = new LocalProcessing.Whisper(executable, weights, executable.equals(bundled.executable()) && bundled.cpu());
+        try {
+            whisper = library.whisperSettings();
+            systemPrompt = library.noteSystemPrompt();
+            noteTimeLimitMinutes = library.noteTimeLimitMinutes();
+            profiles = library.profiles();
+        } catch (Exception error) {
+            var bundled = LocalProcessing.bundledWhisper(false);
+            if (!bundled.available()) bundled = LocalProcessing.bundledWhisper(true);
+            whisper = bundled;
+        }
         noteEditor = new MarkdownEditor(note, player::currentTimeMillis);
         noteEditor.setOnSeek(time -> {
             if (selected != null && selected.hasAudio()) player.seek(time, true);
@@ -92,11 +94,33 @@ final class LectureDocuments {
         });
     }
 
-    private static Path configuredPath(String variable, Path fallback) {
-        String value = System.getenv(variable);
-        if (value == null || value.isBlank()) return fallback;
-        try { return Path.of(value).toAbsolutePath(); }
-        catch (java.nio.file.InvalidPathException error) { return fallback; }
+    /** Кнопка «Настройки моделей» ведёт на общую вкладку настроек. */
+    void setOpenSettings(Runnable action) {
+        openSettings = action;
+    }
+
+    /** Перечитывает настройки библиотеки после изменений во вкладке «Настройки». */
+    void reloadSettings() {
+        worker.execute(() -> {
+            try {
+                var engine = library.whisperSettings();
+                var savedProfiles = library.profiles();
+                String prompt = library.noteSystemPrompt();
+                int minutes = library.noteTimeLimitMinutes();
+                Platform.runLater(() -> {
+                    if (closed) return;
+                    whisper = engine;
+                    profiles = savedProfiles;
+                    systemPrompt = prompt;
+                    noteTimeLimitMinutes = minutes;
+                    updateButtons();
+                });
+            } catch (Exception error) {
+                Platform.runLater(() -> {
+                    if (!closed) DesktopDialogs.notice(owner, "Не удалось перечитать настройки приложения.");
+                });
+            }
+        });
     }
 
     LocalProcessing.Whisper whisper() {
@@ -108,7 +132,7 @@ final class LectureDocuments {
         transcript.getSelectionModel().selectedItemProperty().addListener((obs, prior, value) -> updateButtons());
         transcript.setOnMouseClicked(event -> { if (event.getClickCount() == 2) playSegment(); });
         recognize.setOnAction(event -> startRecognition());
-        whisperSettings.setOnAction(event -> configureWhisper());
+        modelSettings.setOnAction(event -> openSettings.run());
         playLine.setOnAction(event -> playSegment());
         editLine.setOnAction(event -> editSegment());
         diarize.setOnAction(event -> startDiarization());
@@ -118,7 +142,7 @@ final class LectureDocuments {
             for (var segment : transcript.getItems()) markdown.append("- ").append(segment).append('\n');
             export("transcript.md", markdown.toString());
         });
-        var panel = new VBox(8, transcript, status, new HBox(8, recognize, whisperSettings, exportTranscript),
+        var panel = new VBox(8, transcript, status, new HBox(8, recognize, modelSettings, exportTranscript),
                 new HBox(8, playLine, editLine), new HBox(8, diarize, renameSpeaker));
         panel.setPadding(new Insets(6, 10, 10, 10));
         VBox.setVgrow(transcript, Priority.ALWAYS);
@@ -247,34 +271,11 @@ final class LectureDocuments {
         }
     }
 
-    private boolean configureWhisper() {
-        var executable = new TextField(whisper.executable().toString());
-        var modelFile = new TextField(whisper.model().toString());
-        executable.setPrefColumnCount(36);
-        modelFile.setPrefColumnCount(36);
-        var cpuOnly = new CheckBox("Использовать CPU");
-        cpuOnly.setSelected(whisper.cpu());
-        var settings = DesktopDialogs.fields();
-        DesktopDialogs.field(settings, 0, "whisper-cli.exe", executable);
-        DesktopDialogs.field(settings, 1, "Файл модели", modelFile);
-        settings.add(cpuOnly, 1, 2);
-        if (!DesktopDialogs.form(owner, "Настройки Whisper", settings)) return false;
-        try {
-            var chosen = new LocalProcessing.Whisper(Path.of(executable.getText().strip()).toAbsolutePath(),
-                    Path.of(modelFile.getText().strip()).toAbsolutePath(), cpuOnly.isSelected());
-            if (chosen.available()) {
-                whisper = chosen;
-                return true;
-            }
-        } catch (IllegalArgumentException error) {
-            // Invalid path syntax uses the same feedback as a missing file.
-        }
-        DesktopDialogs.notice(owner, "Укажите существующие файлы whisper-cli.exe и модели.");
-        return false;
-    }
-
     private void startRecognition() {
-        if (!whisper.available() && !configureWhisper()) return;
+        if (!whisper.available()) {
+            DesktopDialogs.notice(owner, "Файлы Whisper не найдены. Укажите их во вкладке «Настройки».");
+            return;
+        }
         String id = selected.id();
         LocalProcessing.Whisper engine = whisper;
         run("Распознаём речь", () -> {
@@ -341,8 +342,15 @@ final class LectureDocuments {
             DesktopDialogs.notice(owner, "Сохраните текущую редакцию перед генерацией.");
             return;
         }
-        var address = new TextField(endpoint);
-        var name = new TextField(model);
+        if (profiles.isEmpty()) {
+            DesktopDialogs.notice(owner, "Создайте профиль модели во вкладке «Настройки».");
+            return;
+        }
+        var profile = new ComboBox<LectureLibrary.Profile>();
+        profile.getItems().setAll(profiles);
+        profiles.stream().filter(LectureLibrary.Profile::isDefault).findFirst()
+                .or(() -> profiles.stream().findFirst())
+                .ifPresent(profile::setValue);
         var focus = new TextField(selected.focus());
         var timeLimit = new TextField(Integer.toString(noteTimeLimitMinutes));
         var prompt = new TextArea(systemPrompt);
@@ -350,24 +358,24 @@ final class LectureDocuments {
         prompt.setPrefColumnCount(56);
         prompt.setPrefRowCount(8);
         var settings = DesktopDialogs.fields();
-        DesktopDialogs.field(settings, 0, "Локальный API", address);
-        DesktopDialogs.field(settings, 1, "ID модели", name);
-        DesktopDialogs.field(settings, 2, "Фокус", focus);
-        DesktopDialogs.field(settings, 3, "Лимит времени, мин", timeLimit);
-        DesktopDialogs.field(settings, 4, "Системный промпт", prompt);
+        DesktopDialogs.field(settings, 0, "Профиль модели", profile);
+        DesktopDialogs.field(settings, 1, "Фокус", focus);
+        DesktopDialogs.field(settings, 2, "Лимит времени, мин", timeLimit);
+        DesktopDialogs.field(settings, 3, "Системный промпт", prompt);
+        var hint = new Label("Основной профиль и промпт задаются во вкладке «Настройки».");
+        hint.getStyleClass().add("note-hint");
+        settings.add(hint, 1, 4);
         if (!DesktopDialogs.form(owner, "Сформировать конспект", settings)) return;
-        endpoint = address.getText().strip();
-        model = name.getText().strip();
-        final URI base;
-        try { base = URI.create(endpoint); }
-        catch (IllegalArgumentException error) {
-            DesktopDialogs.notice(owner, "Проверьте адрес локального API.");
+        var chosen = profile.getValue();
+        if (chosen == null) {
+            DesktopDialogs.notice(owner, "Выберите профиль модели.");
             return;
         }
-        var item = selected;
-        var source = List.copyOf(transcript.getItems());
-        Long sourceId = transcriptId;
-        String modelId = model;
+        if (chosen.cloud() && !DesktopDialogs.confirm(owner, "Отправка текста во внешний сервис",
+                "Профиль «" + chosen.name() + "» обращается к " + chosen.baseUrl() + ".\n"
+                        + "Модель: " + chosen.modelId() + ".\n"
+                        + "Передаём тему, фокус и текст расшифровки (" + transcript.getItems().size()
+                        + " реплик). Звук не передаётся.")) return;
         String requestedFocus = focus.getText().strip();
         String requestedPrompt = prompt.getText();
         if (requestedPrompt.isBlank()) {
@@ -382,12 +390,19 @@ final class LectureDocuments {
             DesktopDialogs.notice(owner, "Укажите положительное целое число минут.");
             return;
         }
+        var item = selected;
+        var source = List.copyOf(transcript.getItems());
+        Long sourceId = transcriptId;
+        var llm = chosen.llm("");
+        boolean needsKey = chosen.hasSecret();
+        long profileId = chosen.id();
         systemPrompt = requestedPrompt;
         noteTimeLimitMinutes = minutes;
         run("Формируем конспект", () -> {
+            String secret = needsKey ? InvitationSecret.unprotectText(library.profileSecret(profileId)) : "";
             library.saveNoteSettings(requestedPrompt, minutes);
             String markdown = LocalProcessing.generate(item.topic().isBlank() ? item.title() : item.topic(),
-                    source, base, modelId, requestedFocus, requestedPrompt, java.time.Duration.ofMinutes(minutes));
+                    source, llm, requestedFocus, requestedPrompt, java.time.Duration.ofMinutes(minutes));
             library.saveNote(item.id(), sourceId, markdown, true);
             return () -> setNote(new LectureLibrary.Note(sourceId, markdown));
         }, true);
@@ -502,7 +517,7 @@ final class LectureDocuments {
         noteEditor.setDirty(dirty());
         noteEditor.setTimecodeAvailable(available && selected != null && selected.hasAudio());
         recognize.setDisable(!available || !selected.hasAudio());
-        whisperSettings.setDisable(busy.get());
+        modelSettings.setDisable(false);
         playLine.setDisable(!available || !selected.hasAudio() || transcript.getSelectionModel().isEmpty());
         editLine.setDisable(!available || transcriptId == null || transcript.getSelectionModel().isEmpty());
         diarize.setDisable(!available || !selected.hasAudio() || transcriptId == null || transcript.getItems().isEmpty());

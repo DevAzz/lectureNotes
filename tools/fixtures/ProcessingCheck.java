@@ -92,10 +92,64 @@ public final class ProcessingCheck {
             library.saveNoteSettings(customPrompt, 17);
             check(customPrompt.equals(library.noteSystemPrompt()), "Custom system prompt");
 
+            var seededProfiles = library.profiles();
+            check(seededProfiles.size() == 1 && seededProfiles.getFirst().isDefault()
+                            && "iq3_s".equals(seededProfiles.getFirst().modelId()),
+                    "A fresh library offers the local model profile");
+            long external = library.saveProfile(null, "Внешний API", "https://example.com/v1", "большая модель",
+                    true, 16_000, 1_000, 300, null, true);
+            check(library.profiles().size() == 2, "Profile created from the settings tab");
+            check(library.profiles().stream().anyMatch(item -> item.id() == external && item.isDefault()
+                            && item.cloud() && item.answerTokens() == 1_000),
+                    "The saved profile became the default one");
+            library.setDefaultProfile(seededProfiles.getFirst().id());
+            check(library.profiles().stream().filter(LectureLibrary.Profile::isDefault).count() == 1,
+                    "Only one profile stays default");
+            try {
+                library.saveProfile(null, "Неверный адрес", "ftp://example.com/v1", "модель", false, 100, 0, 30,
+                        null, false);
+                throw new AssertionError("An invalid profile address was accepted.");
+            } catch (java.io.IOException expected) { }
+            library.deleteProfile(external);
+            check(library.profiles().size() == 1 && library.profiles().getFirst().isDefault(),
+                    "Deleting a profile keeps one default");
+
+            var bundledEngine = LocalProcessing.bundledWhisper(true);
+            var engineFile = bundledEngine.available() ? bundledEngine.executable()
+                    : Files.writeString(work.resolve("whisper-cli.exe"), "placeholder");
+            var modelFile = bundledEngine.available() ? bundledEngine.model()
+                    : Files.writeString(work.resolve("check-model.bin"), "placeholder");
+            library.saveWhisperSettings(engineFile, modelFile, true, "ru");
+            var configured = library.whisperSettings();
+            check(configured.cpu() && "ru".equals(configured.language())
+                            && configured.executable().equals(engineFile.toAbsolutePath().normalize())
+                            && configured.model().equals(modelFile.toAbsolutePath().normalize()),
+                    "Whisper engine and language are stored in the library");
+
+            var subjectNames = library.subjects();
+            check(subjectNames.size() == 1 && subjectNames.getFirst().name().equals("Математика")
+                            && subjectNames.getFirst().lectures() == 1, "Subject list counts its lectures");
+            long math = subjectNames.getFirst().id();
+            long physics = library.saveSubject(null, "Физика", "Механика");
+            check(library.moveSubjectLectures(math, physics) == 1, "All lectures moved to another subject");
+            check(library.subjectLectures(physics).size() == 1 && library.subjectLectures(math).isEmpty(),
+                    "Subject lecture lists follow the move");
+            library.deleteSubject(math);
+            check(library.subjects().size() == 1, "An empty subject is removed");
+            library.saveSubject(physics, "Физика", "Механика и поля");
+            check("Механика и поля".equals(library.subjects().getFirst().description()), "Subject description saved");
+            try {
+                library.saveSubject(null, "физика", "");
+                throw new AssertionError("A duplicate subject name was accepted.");
+            } catch (java.io.IOException expected) { }
+            library.moveLecture(lectureId, library.saveSubject(null, "Математика", ""));
+            check(library.lecture(lectureId).subject().equals("Математика"), "One lecture moved between subjects");
+
             HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 1);
             var attempts = new AtomicInteger();
             var requestsWithoutTokenCap = new AtomicInteger();
             var slowRequests = new AtomicInteger();
+            var keyedRequests = new AtomicInteger();
             server.createContext("/v1/chat/completions", exchange -> {
                 try (exchange) {
                     String prompt = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
@@ -104,7 +158,20 @@ public final class ProcessingCheck {
                         return;
                     }
                     String payload;
-                    if (prompt.contains("\"model\":\"plain-note\"")) {
+                    if (prompt.contains("\"model\":\"keyed-note\"")) {
+                        if (!"Bearer sk-test-700".equals(exchange.getRequestHeaders().getFirst("Authorization"))) {
+                            exchange.sendResponseHeaders(401, -1);
+                            return;
+                        }
+                        keyedRequests.incrementAndGet();
+                        payload = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"Конспект с ключом.\"}}]}";
+                    } else if (prompt.contains("\"model\":\"capped-note\"")) {
+                        if (!prompt.contains("\"max_tokens\":256")) {
+                            exchange.sendResponseHeaders(400, -1);
+                            return;
+                        }
+                        payload = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"Конспект с лимитом.\"}}]}";
+                    } else if (prompt.contains("\"model\":\"plain-note\"")) {
                         if (!prompt.contains(Json.quote(customPrompt))) {
                             exchange.sendResponseHeaders(400, -1);
                             return;
@@ -132,21 +199,48 @@ public final class ProcessingCheck {
             server.start();
             try {
                 URI api = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
-                String generated = LocalProcessing.generate("Скорость изменения", segments, api, "iq3_s", "",
-                        LocalProcessing.DEFAULT_SYSTEM_PROMPT, Duration.ofSeconds(10));
+                var local = new LocalProcessing.Llm(api.toString(), "iq3_s", "", 0, 900, false);
+                String generated = LocalProcessing.generate("Скорость изменения", segments, local,
+                        "", LocalProcessing.DEFAULT_SYSTEM_PROMPT, Duration.ofSeconds(10));
                 library.saveNote(lectureId, transcriptId, generated, true);
                 check(generated.contains("[00:01:01](#t=61500)"), "Timestamp rendered from segment");
                 check(generated.contains("[[S999]]"), "Unknown reference left as text");
                 check(library.documents(lectureId).note().markdown().equals(generated), "Current note");
                 check(library.noteVersions(lectureId).size() == 2, "Manual edition preserved");
-                String free = LocalProcessing.generate("Скорость изменения", segments, api, "plain-note", "", customPrompt,
+                String free = LocalProcessing.generate("Скорость изменения", segments,
+                        new LocalProcessing.Llm(api.toString(), "plain-note", "", 0, 900, false), "", customPrompt,
                         Duration.ofSeconds(10));
                 check(free.equals("Свободный конспект.") && attempts.get() == 4 && requestsWithoutTokenCap.get() == 4,
                         "Provider truncation splits the part, and free-form text is accepted without a token cap");
+                String capped = LocalProcessing.generate("Скорость изменения", segments,
+                        new LocalProcessing.Llm(api.toString(), "capped-note", "", 256, 900, false), "", customPrompt,
+                        Duration.ofSeconds(10));
+                check(capped.equals("Конспект с лимитом."), "Answer budget reaches the request as max_tokens");
+                String keyed = LocalProcessing.generate("Скорость изменения", segments,
+                        new LocalProcessing.Llm(api.toString(), "keyed-note", "sk-test-700", 0, 900, false), "",
+                        customPrompt, Duration.ofSeconds(10));
+                check(keyed.equals("Конспект с ключом.") && keyedRequests.get() == 1,
+                        "Profile key is sent as a bearer token");
+                try {
+                    LocalProcessing.generate("Скорость изменения", segments,
+                            new LocalProcessing.Llm(api.toString(), "keyed-note", "ключ с пробелом", 0, 900, false),
+                            "", customPrompt, Duration.ofSeconds(10));
+                    throw new AssertionError("A non-ASCII key reached the HTTP header.");
+                } catch (java.io.IOException error) {
+                    check(error.getMessage().contains("ASCII"), "A non-ASCII profile key is rejected early");
+                }
+                check(LocalProcessing.probe(local).contains("Ответ за"), "Profile connection check");
+                try {
+                    LocalProcessing.endpoint(new LocalProcessing.Llm("http://example.com/v1", "m", "", 0, 60, false));
+                    throw new AssertionError("Plain HTTP for an external host was accepted.");
+                } catch (java.io.IOException error) {
+                    check(error.getMessage().contains("https"), "External profiles require HTTPS");
+                }
                 try {
                     var longSegments = List.of(new LocalProcessing.Segment(0, 1000, "А".repeat(7_900)),
                             new LocalProcessing.Segment(1000, 2000, "Б".repeat(7_900)));
-                    LocalProcessing.generate("Тест времени", longSegments, api, "slow-note", "", customPrompt,
+                    LocalProcessing.generate("Тест времени", longSegments,
+                            new LocalProcessing.Llm(api.toString(), "slow-note", "", 0, 900, false), "", customPrompt,
                             Duration.ofMillis(1_100));
                     throw new AssertionError("Generation ignored the shared time limit.");
                 } catch (java.io.IOException error) {
@@ -155,7 +249,8 @@ public final class ProcessingCheck {
                 }
                 check(library.documents(lectureId).note().markdown().equals(generated), "Timeout leaves the saved note available");
                 if (liveModel != null) {
-                    String live = LocalProcessing.generate("Скорость изменения", segments, URI.create(liveModel), "iq3_s",
+                    String live = LocalProcessing.generate("Скорость изменения", segments,
+                            new LocalProcessing.Llm(liveModel, "iq3_s", "", 0, 900, false),
                             "", LocalProcessing.DEFAULT_SYSTEM_PROMPT, Duration.ofMinutes(5));
                     check(!live.isBlank(), "Local model generation");
                     System.out.println("Live iq3_s checked.");
@@ -189,6 +284,12 @@ public final class ProcessingCheck {
         try (var reopened = new LectureLibrary(work)) {
             check(reopened.noteSystemPrompt().equals(customPrompt), "Custom system prompt survives restart");
             check(reopened.noteTimeLimitMinutes() == 17, "Time budget survives restart");
+            check(reopened.whisperSettings().cpu() && "ru".equals(reopened.whisperLanguage()),
+                    "Whisper settings survive restart");
+            check(reopened.profiles().size() == 1 && reopened.profiles().getFirst().isDefault(),
+                    "Model profiles survive restart");
+            check(reopened.subjects().stream().anyMatch(item -> item.name().equals("Физика")
+                            && item.description().equals("Механика и поля")), "Subjects survive restart");
             check(reopened.liveSegments(lectureId).getFirst().segment().text().equals("Исправленная черновая реплика."),
                     "Edited live draft survives restart");
             check(reopened.documents(lectureId).segments().getFirst().text().contains("описывает"),

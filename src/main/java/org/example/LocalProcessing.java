@@ -56,11 +56,18 @@ final class LocalProcessing {
         @Override public String toString() { return RecordingPlayer.timestamp(start) + "  " + attributedText(); }
     }
 
-    record Whisper(Path executable, Path model, boolean cpu) {
+    record Whisper(Path executable, Path model, boolean cpu, String language) {
+        Whisper(Path executable, Path model, boolean cpu) { this(executable, model, cpu, "ru"); }
+
         boolean available() {
             return Files.isRegularFile(executable) && Files.isRegularFile(model);
         }
+
+        Whisper withModel(Path weights) { return new Whisper(executable, weights, cpu, language); }
     }
+
+    /** Профиль OpenAI-compatible API: адрес, модель, секрет и лимиты одного запроса. */
+    record Llm(String baseUrl, String model, String secret, int answerTokens, int timeoutSeconds, boolean cloud) { }
 
     static Whisper bundledWhisper(boolean cpu) {
         try {
@@ -130,7 +137,7 @@ final class LocalProcessing {
 
     static Whisper cpuFallback(Whisper engine) {
         if (!engine.executable().equals(bundledWhisper(false).executable())) return null;
-        return new Whisper(bundledWhisper(true).executable(), engine.model(), true);
+        return new Whisper(bundledWhisper(true).executable(), engine.model(), true, engine.language());
     }
 
     static Whisper runWhisper(Whisper engine, Whisper fallback, Path input, Path output, Duration timeout)
@@ -149,7 +156,7 @@ final class LocalProcessing {
     private static void invokeWhisper(Whisper engine, Path input, Path output, Duration timeout)
             throws IOException, InterruptedException {
         var command = new ArrayList<>(List.of(engine.executable().toString(), "-m", engine.model().toString(),
-                "-f", input.toString(), "-l", "ru", "-osrt", "-of", output.toString()));
+                "-f", input.toString(), "-l", engine.language(), "-osrt", "-of", output.toString()));
         if (engine.cpu()) command.add("-ng");
         Process process = new ProcessBuilder(command).directory(engine.executable().getParent().toFile())
                 .redirectOutput(ProcessBuilder.Redirect.DISCARD).redirectError(ProcessBuilder.Redirect.DISCARD).start();
@@ -198,19 +205,16 @@ final class LocalProcessing {
         }
     }
 
-    static String generate(String topic, List<Segment> segments, URI base, String model, String focus,
+    static String generate(String topic, List<Segment> segments, Llm llm, String focus,
                            String systemPrompt, Duration timeLimit)
             throws Exception {
         if (segments.isEmpty()) throw new IOException("Нет распознанных реплик.");
-        URI endpoint = endpoint(base);
-        if (model.isBlank()) throw new IOException("Укажите ID модели.");
+        URI endpoint = endpoint(llm);
+        if (llm.model().isBlank()) throw new IOException("Укажите ID модели.");
         if (systemPrompt.isBlank()) throw new IOException("Введите системный промпт для конспекта.");
         var deadline = new GenerationDeadline(System.nanoTime(), timeLimit);
-        try (HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(4))
-                .proxy(new ProxySelector() {
-                    @Override public List<Proxy> select(URI uri) { return List.of(Proxy.NO_PROXY); }
-                    @Override public void connectFailed(URI uri, SocketAddress address, IOException error) { }
-                }).followRedirects(HttpClient.Redirect.NEVER).build()) {
+        try (HttpClient client = client(llm.cloud())) {
+            var channel = new Channel(client, endpoint, llm);
             var drafts = new ArrayList<String>();
             var part = new StringBuilder();
             String context = "Тема лекции — " + topic + "\n";
@@ -221,14 +225,14 @@ final class LocalProcessing {
             for (int index = 0; index < segments.size(); index++) {
                 String segment = "S" + (index + 1) + " " + segments.get(index).attributedText() + "\n";
                 if (part.length() + segment.length() > PROMPT_PART_LENGTH && !part.isEmpty()) {
-                    addDrafts(drafts, client, endpoint, model, systemPrompt, draftSource, part.toString(), deadline);
+                    addDrafts(drafts, channel, systemPrompt, draftSource, part.toString(), deadline);
                     part.setLength(0);
                 }
                 part.append(segment);
             }
             if (!part.isEmpty()) {
-                addDrafts(drafts, client, endpoint, model, systemPrompt, drafts.isEmpty() ? source : draftSource,
-                        part.toString(), deadline);
+                addDrafts(drafts, channel, systemPrompt, drafts.isEmpty() ? source : draftSource, part.toString(),
+                        deadline);
             }
             String markdown = drafts.getFirst();
             if (drafts.size() > 1) {
@@ -237,8 +241,9 @@ final class LocalProcessing {
                 markdown = combined.toString();
                 if (combined.length() <= SYNTHESIS_LENGTH) {
                     try {
-                        markdown = complete(client, endpoint, model, systemPrompt,
-                                context + "\nОбъедини эти черновики в один конспект и убери повторы.\n\n" + combined, deadline);
+                        markdown = complete(channel, systemPrompt,
+                                context + "\nОбъедини эти черновики в один конспект и убери повторы.\n\n" + combined,
+                                deadline);
                     } catch (Json.CompletionLimit ignored) {
                         // Preserve the complete drafts if the provider's limit cuts off the synthesis.
                     }
@@ -258,55 +263,133 @@ final class LocalProcessing {
         }
     }
 
-    static URI endpoint(URI base) throws IOException {
-        if (!"http".equals(base.getScheme()) || !"127.0.0.1".equals(base.getHost())
-                || base.getPort() <= 0 || base.getUserInfo() != null || base.getQuery() != null
-                || base.getFragment() != null || !List.of("/v1", "/v1/").contains(base.getPath())) {
-            throw new IOException("Укажите локальный API в формате http://127.0.0.1:порт/v1.");
+    /** Нейтральный запрос из экрана профилей: проверяет адрес, ID модели и ключ. */
+    static String probe(Llm llm) throws Exception {
+        URI endpoint = endpoint(llm);
+        if (llm.model().isBlank()) throw new IOException("Укажите ID модели.");
+        long seconds = Math.min(Math.max(llm.timeoutSeconds(), 5), 120);
+        var deadline = new GenerationDeadline(System.nanoTime(), Duration.ofSeconds(seconds));
+        try (HttpClient client = client(llm.cloud())) {
+            long started = System.nanoTime();
+            String answer = complete(new Channel(client, endpoint, llm),
+                    "Ответь одним словом «ок» и ничего не добавляй.", "Проверка соединения.", deadline);
+            String brief = answer.strip().replaceAll("\\s+", " ");
+            if (brief.length() > 120) brief = brief.substring(0, 120) + "…";
+            return "Ответ за " + (System.nanoTime() - started) / 1_000_000 + " мс: " + brief;
         }
-        return URI.create("http://127.0.0.1:" + base.getPort() + "/v1/chat/completions");
     }
 
-    private static void addDrafts(List<String> drafts, HttpClient client, URI endpoint, String model, String prompt,
-                                  String source, String part, GenerationDeadline deadline)
-            throws IOException, InterruptedException {
+    private static HttpClient client(boolean cloud) {
+        var builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(cloud ? 8 : 4))
+                .followRedirects(HttpClient.Redirect.NEVER);
+        if (!cloud) {
+            builder.proxy(new ProxySelector() {
+                @Override public List<Proxy> select(URI uri) { return List.of(Proxy.NO_PROXY); }
+                @Override public void connectFailed(URI uri, SocketAddress address, IOException error) { }
+            });
+        }
+        return builder.build();
+    }
+
+    /** Один HTTP-клиент и один профиль на всю генерацию конспекта. */
+    private record Channel(HttpClient client, URI endpoint, Llm llm) { }
+
+    /** Локальный API принимает только loopback, внешний профиль обязан идти по HTTPS. */
+    static URI endpoint(Llm llm) throws IOException {
+        URI base;
         try {
-            drafts.add(complete(client, endpoint, model, prompt, source + part, deadline));
+            base = URI.create(llm.baseUrl() == null ? "" : llm.baseUrl().strip());
+        } catch (IllegalArgumentException error) {
+            throw badEndpoint();
+        }
+        String scheme = base.getScheme();
+        String host = base.getHost();
+        if (host == null || base.getUserInfo() != null || base.getQuery() != null || base.getFragment() != null
+                || (!"http".equals(scheme) && !"https".equals(scheme))) throw badEndpoint();
+        boolean local = "127.0.0.1".equals(host) || "localhost".equals(host);
+        if (local && !"http".equals(scheme)) throw badEndpoint();
+        if (!local && !"https".equals(scheme)) throw badEndpoint();
+        if (local && (base.getPort() <= 0 || base.getPort() > 65_535)) throw badEndpoint();
+        String path = base.getRawPath() == null ? "" : base.getRawPath().replaceAll("/+$", "");
+        if (path.endsWith("/chat/completions")) return URI.create(origin(base) + path);
+        if (path.isEmpty() || path.equals("/v1")) return URI.create(origin(base) + path + "/chat/completions");
+        throw badEndpoint();
+    }
+
+    /** Адрес провайдера без пути — его показываем при согласии на отправку текста в облако. */
+    static String origin(String baseUrl) throws IOException {
+        URI base;
+        try {
+            base = URI.create(baseUrl == null ? "" : baseUrl.strip());
+        } catch (IllegalArgumentException error) {
+            throw new IOException("Проверьте базовый URL API.");
+        }
+        if (base.getHost() == null) throw new IOException("Проверьте базовый URL API.");
+        return origin(base);
+    }
+
+    private static String origin(URI base) {
+        int port = base.getPort();
+        return base.getScheme() + "://" + base.getHost() + (port > 0 ? ":" + port : "");
+    }
+
+    private static IOException badEndpoint() {
+        return new IOException("Локальный API — http://127.0.0.1:порт/v1, внешний — https://адрес/v1.");
+    }
+
+    private static void addDrafts(List<String> drafts, Channel channel, String prompt, String source, String part,
+                                  GenerationDeadline deadline) throws IOException, InterruptedException {
+        try {
+            drafts.add(complete(channel, prompt, source + part, deadline));
         } catch (Json.CompletionLimit error) {
             int middle = part.lastIndexOf('\n', part.length() / 2);
             if (middle <= 0) middle = part.indexOf('\n', part.length() / 2);
             if (middle <= 0 || middle >= part.length() - 1) throw error;
-            drafts.add(complete(client, endpoint, model, prompt, source + part.substring(0, middle + 1), deadline));
-            drafts.add(complete(client, endpoint, model, prompt, source + part.substring(middle + 1), deadline));
+            drafts.add(complete(channel, prompt, source + part.substring(0, middle + 1), deadline));
+            drafts.add(complete(channel, prompt, source + part.substring(middle + 1), deadline));
         }
     }
 
-    private static String complete(HttpClient client, URI endpoint, String model, String prompt, String data,
-                                   GenerationDeadline deadline) throws IOException, InterruptedException {
-        var response = sendCompletion(client, endpoint, model, prompt, data, deadline, true);
+    private static String complete(Channel channel, String prompt, String data, GenerationDeadline deadline)
+            throws IOException, InterruptedException {
+        var response = sendCompletion(channel, prompt, data, deadline, true);
         if (response.statusCode() == 400 || response.statusCode() == 422) {
             // Some compatible local APIs reject chat-template options.
-            response = sendCompletion(client, endpoint, model, prompt, data, deadline, false);
+            response = sendCompletion(channel, prompt, data, deadline, false);
         }
         if (response.statusCode() != 200) {
-            throw new IOException("Локальная модель вернула HTTP " + response.statusCode() + ".");
+            throw new IOException("Модель вернула HTTP " + response.statusCode() + ".");
         }
         return Json.completion(response.body());
     }
 
-    private static HttpResponse<String> sendCompletion(HttpClient client, URI endpoint, String model, String prompt,
-                                                       String data, GenerationDeadline deadline, boolean disableThinking)
+    private static HttpResponse<String> sendCompletion(Channel channel, String prompt, String data,
+                                                       GenerationDeadline deadline, boolean disableThinking)
             throws IOException, InterruptedException {
-        String options = disableThinking ? "\"chat_template_kwargs\":{\"enable_thinking\":false}," : "";
+        Llm llm = channel.llm();
+        var options = new StringBuilder();
+        if (disableThinking) options.append("\"chat_template_kwargs\":{\"enable_thinking\":false},");
+        if (llm.answerTokens() > 0) options.append("\"max_tokens\":").append(llm.answerTokens()).append(',');
         String json = """
                 {"model":%s,"temperature":0.1,%s"messages":[
                 {"role":"system","content":%s},{"role":"user","content":%s}]}
-                """.formatted(Json.quote(model), options, Json.quote(prompt), Json.quote(data));
+                """.formatted(Json.quote(llm.model()), options, Json.quote(prompt), Json.quote(data));
         Duration remaining = deadline.remaining();
-        HttpRequest request = HttpRequest.newBuilder(endpoint).timeout(remaining)
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(json)).build();
-        var pending = client.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+        if (llm.timeoutSeconds() > 0) {
+            Duration perRequest = Duration.ofSeconds(llm.timeoutSeconds());
+            if (perRequest.compareTo(remaining) < 0) remaining = perRequest;
+        }
+        var request = HttpRequest.newBuilder(channel.endpoint()).timeout(remaining)
+                .header("Content-Type", "application/json");
+        var secret = llm.secret().strip();
+        if (!secret.isEmpty()) {
+            if (!secret.chars().allMatch(symbol -> symbol >= 0x21 && symbol <= 0x7e)) {
+                throw new IOException("Ключ API должен быть ASCII и не содержать пробелов.");
+            }
+            request.header("Authorization", "Bearer " + secret);
+        }
+        HttpRequest httpRequest = request.POST(HttpRequest.BodyPublishers.ofString(json)).build();
+        var pending = channel.client().sendAsync(httpRequest, HttpResponse.BodyHandlers.ofString());
         try {
             return pending.get(Math.max(1, deadline.remaining().toMillis()), TimeUnit.MILLISECONDS);
         } catch (TimeoutException error) {
@@ -314,7 +397,7 @@ final class LocalProcessing {
         } catch (ExecutionException error) {
             if (error.getCause() instanceof HttpTimeoutException) throw noteTimeout();
             if (error.getCause() instanceof IOException failure) throw failure;
-            throw new IOException("Не удалось получить ответ локальной модели.", error);
+            throw new IOException("Не удалось получить ответ модели.", error);
         } finally {
             if (!pending.isDone()) pending.cancel(true);
         }
