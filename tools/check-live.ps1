@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory)][string]$SpeechWav,
-    [string]$AppDirectory = 'target/standalone-app-full',
+    [string]$AppDirectory = 'target/standalone-runtime',
     [string]$SilentWav
 )
 

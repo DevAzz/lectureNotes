@@ -1,4 +1,4 @@
-param([Parameter(Mandatory)][string]$Destination, [switch]$Full)
+param([Parameter(Mandatory)][string]$Destination)
 
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
@@ -15,18 +15,6 @@ $cudaName = 'whisper-cublas-12.4.0-bin-x64.zip'
 $cudaArchive = Get-BuildAsset $cache $cudaName `
     "https://github.com/ggml-org/whisper.cpp/releases/download/$version/$cudaName" `
     'b07cff4e59831b227896018facbb6334907bf324a342c84597c44f087823d252'
-if ($Full) {
-    $weights = Join-Path $cache 'ggml-large-v3.bin'
-    if (!(Test-Path -LiteralPath $weights -PathType Leaf) -or
-            (Get-FileHash -LiteralPath $weights -Algorithm SHA256).Hash -ne
-            '64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2') {
-        throw "Place the verified ggml-large-v3.bin weights in $cache."
-    }
-} else {
-    $model = 'ggml-large-v3-turbo-q5_0.bin'
-    $weights = Get-BuildAsset $cache $model "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/$model" `
-        '394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2'
-}
 $runtimeLicense = Get-BuildAsset $cache "LICENSE-whisper.cpp-$version.txt" `
     "https://raw.githubusercontent.com/ggml-org/whisper.cpp/$version/LICENSE" `
     '94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d'
@@ -53,7 +41,7 @@ $core = @('whisper-cli.exe', 'whisper.dll', 'ggml.dll', 'ggml-base.dll', 'ggml-c
 $cuda = $core + @('ggml-cuda.dll', 'cublas64_12.dll', 'cublasLt64_12.dll', 'cudart64_12.dll')
 Copy-Runtime $cpuArchive $Destination $core
 Copy-Runtime $cudaArchive (Join-Path $Destination 'cuda') $cuda
-Copy-Item -LiteralPath $weights,$runtimeLicense,$modelLicense -Destination $Destination -Force
+Copy-Item -LiteralPath $runtimeLicense,$modelLicense -Destination $Destination -Force
 @'
 NVIDIA CUDA 12.4 runtime and cuBLAS libraries
 Copyright NVIDIA Corporation. All rights reserved.

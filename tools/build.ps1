@@ -1,9 +1,9 @@
-param([switch]$AppImage, [switch]$FullWhisper)
+param([switch]$AppImage)
 
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
 $output = Join-Path $project 'target'
-$appInput = Join-Path $output $(if ($FullWhisper) { 'standalone-app-full' } else { 'standalone-app' })
+$appInput = Join-Path $output 'standalone-runtime'
 $libraries = Join-Path $appInput 'lib'
 New-Item -ItemType Directory -Path $appInput,$libraries -Force | Out-Null
 
@@ -16,7 +16,7 @@ Copy-Item -LiteralPath (Join-Path $output 'lectureNotes-1.0-SNAPSHOT.jar') -Dest
 Get-ChildItem -LiteralPath (Join-Path $output 'lib') -Filter '*.jar' |
     Copy-Item -Destination $libraries
 Copy-Item -LiteralPath (Join-Path $output 'native/audio-capture.exe') -Destination $appInput
-& (Join-Path $PSScriptRoot 'build-whisper.ps1') -Destination (Join-Path $appInput 'whisper') -Full:$FullWhisper
+& (Join-Path $PSScriptRoot 'build-whisper.ps1') -Destination (Join-Path $appInput 'whisper')
 & (Join-Path $PSScriptRoot 'build-diarization.ps1') -Destination (Join-Path $appInput 'diarization')
 $fxModules = 'javafx.controls,javafx.media'
 $nativeAccess = '--enable-native-access=javafx.graphics,javafx.media,ALL-UNNAMED'
@@ -34,7 +34,7 @@ if ($AppImage) {
     $packageOptions = @('--type', 'app-image', '--name', 'LectureNotes', '--dest', $distribution,
         '--temp', $temporary, '--input', $appInput, '--main-jar', 'lecture-notes.jar',
         '--main-class', 'org.example.Main', '--module-path', $modulePath,
-        '--add-modules', "java.desktop,java.net.http,java.sql,jdk.zipfs,$fxModules",
+        '--add-modules', "java.desktop,java.net.http,java.sql,jdk.crypto.ec,jdk.zipfs,$fxModules",
         '--java-options', "--add-modules=$fxModules", '--java-options', $nativeAccess)
     & jpackage @packageOptions
     if ($LASTEXITCODE -ne 0) { throw "Windows packaging failed ($LASTEXITCODE)." }

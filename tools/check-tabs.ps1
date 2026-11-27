@@ -4,8 +4,8 @@ $project = Split-Path -Parent $PSScriptRoot
 
 $work = Join-Path $project ('target/tabs-check/' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work -Force | Out-Null
-$jar = Join-Path $project 'target/standalone-app/lecture-notes.jar'
-$libraries = Join-Path $project 'target/standalone-app/lib'
+$jar = Join-Path $project 'target/standalone-runtime/lecture-notes.jar'
+$libraries = Join-Path $project 'target/standalone-runtime/lib'
 $fixture = Join-Path $project 'tools/fixtures/LibraryTabsCheck.java'
 
 & javac --release 25 -encoding UTF-8 --module-path $libraries --add-modules 'javafx.controls,javafx.media' `

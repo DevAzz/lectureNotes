@@ -94,7 +94,7 @@ final class LectureDocuments {
             profiles = library.profiles();
         } catch (Exception error) {
             var bundled = LocalProcessing.bundledWhisper(false);
-            if (!bundled.available()) bundled = LocalProcessing.bundledWhisper(true);
+            if (!Files.isRegularFile(bundled.executable())) bundled = LocalProcessing.bundledWhisper(true);
             whisper = bundled;
         }
         noteEditor = new MarkdownEditor(note, player::currentTimeMillis);

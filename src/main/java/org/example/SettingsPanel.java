@@ -1,6 +1,7 @@
 package org.example;
 
 import javafx.application.Platform;
+import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.scene.Node;
 import javafx.scene.control.Button;
@@ -41,6 +42,7 @@ final class SettingsPanel extends VBox {
     private final Runnable chooseLibraryFolder;
     private final Runnable settingsSaved;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService downloads = Executors.newSingleThreadExecutor(Thread.ofVirtual().factory());
 
     private final ListView<LectureLibrary.Profile> profiles = new ListView<>();
     private final Label profileStatus = status();
@@ -62,7 +64,7 @@ final class SettingsPanel extends VBox {
     private final Button pickExecutable = new Button("Файл whisper-cli.exe…");
     private final Button pickModel = new Button("Файл модели…");
     private final Button saveWhisper = new Button("Сохранить движок");
-    private final Button resetWhisper = new Button("Встроенные файлы");
+    private final Button resetWhisper = new Button("Стандартные пути");
 
     private final TextArea notePrompt = new TextArea();
     private final TextField noteLimit = new TextField();
@@ -155,7 +157,7 @@ final class SettingsPanel extends VBox {
         pickEmbedding.setOnAction(event -> chooseFile(embeddingModel, "Модель сравнения голосов", "*.onnx"));
         diarizationForm.add(pickSegmentation, 2, 0);
         diarizationForm.add(pickEmbedding, 2, 1);
-        var resetModels = new Button("Встроенные модели");
+        var resetModels = new Button("Стандартные модели");
         resetModels.setOnAction(event -> {
             showModels(SpeakerDiarization.Models.bundled());
             say(diarizationStatus, "Нажмите «Сохранить модели», чтобы применить выбор.");
@@ -173,8 +175,12 @@ final class SettingsPanel extends VBox {
                         profiles,
                         new HBox(8, addProfile, editProfile, removeProfile, primaryProfile, testProfile),
                         profileStatus),
-                card("Распознавание речи (Whisper)", whisperForm, whisperStatus),
-                card("Диаризация (sherpa-onnx)", diarizationForm, diarizationStatus),
+                card("Распознавание речи (Whisper)", whisperForm,
+                        modelRow(StandardModel.TURBO, whisperModel, saveWhisper),
+                        modelRow(StandardModel.FULL, whisperModel, saveWhisper), whisperStatus),
+                card("Диаризация (sherpa-onnx)", diarizationForm,
+                        modelRow(StandardModel.SEGMENTATION, segmentationModel, saveDiarization),
+                        modelRow(StandardModel.EMBEDDING, embeddingModel, saveDiarization), diarizationStatus),
                 card("Конспект", notePrompt,
                         new HBox(8, new Label("Лимит времени, мин"), noteLimit, saveNoteSettings, restorePrompt),
                         noteStatus),
@@ -195,7 +201,56 @@ final class SettingsPanel extends VBox {
 
     void close() {
         closed = true;
+        downloads.shutdownNow();
         worker.shutdown();
+    }
+
+    private HBox modelRow(StandardModel model, TextField field, Button save) {
+        var installed = Files.isRegularFile(model.path());
+        var button = new Button(installed ? "Выбрать" : "Скачать");
+        var status = new Label(installed ? "Скачана" : "");
+        status.setWrapText(true);
+        Runnable select = () -> {
+            field.setText(model.path().toString());
+            status.setText("Выбрана. Нажмите «" + save.getText() + "».");
+            button.setText("Выбрать");
+        };
+        button.setOnAction(event -> {
+            if (Files.isRegularFile(model.path())) {
+                select.run();
+                return;
+            }
+            var task = new Task<Path>() {
+                private long shown = -1;
+
+                @Override protected Path call() throws Exception {
+                    return model.download(bytes -> {
+                        long mib = bytes / (1024 * 1024);
+                        if (shown != mib) {
+                            shown = mib;
+                            updateMessage("Скачано " + mib + " МиБ");
+                        }
+                    });
+                }
+            };
+            button.setDisable(true);
+            status.setText("В очереди…");
+            task.messageProperty().addListener((obs, old, value) -> status.setText(value));
+            task.setOnSucceeded(done -> {
+                if (closed) return;
+                button.setDisable(false);
+                select.run();
+            });
+            task.setOnFailed(done -> {
+                if (closed) return;
+                button.setText("Повторить");
+                button.setDisable(false);
+                status.setText("Не удалось скачать модель. " + task.getException().getLocalizedMessage());
+            });
+            downloads.execute(task);
+        });
+        button.accessibleTextProperty().bind(button.textProperty().concat(" " + model.title));
+        return new HBox(8, new Label(model.title), button, status);
     }
 
     /** Перечитывает сохранённые настройки после изменений в библиотеке. */
@@ -393,11 +448,11 @@ final class SettingsPanel extends VBox {
 
     private void useBundledWhisper() {
         var bundled = LocalProcessing.bundledWhisper(false);
-        if (!bundled.available()) bundled = LocalProcessing.bundledWhisper(true);
+        if (!Files.isRegularFile(bundled.executable())) bundled = LocalProcessing.bundledWhisper(true);
         whisperExecutable.setText(bundled.executable().toString());
         whisperModel.setText(bundled.model().toString());
         whisperCpu.setSelected(bundled.cpu());
-        say(whisperStatus, "Встроенные файлы подставлены — нажмите «Сохранить движок».");
+        say(whisperStatus, "Стандартные пути подставлены — нажмите «Сохранить движок».");
     }
 
     private void saveNoteSettings() {

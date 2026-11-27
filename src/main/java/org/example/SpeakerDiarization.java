@@ -31,7 +31,7 @@ final class SpeakerDiarization {
     record Models(Path segmentation, Path embedding) {
         static Models bundled() {
             Path directory = bundledDirectory();
-            return new Models(directory.resolve("segmentation.onnx"), directory.resolve("embedding.onnx"));
+            return new Models(StandardModel.SEGMENTATION.preferred(directory), StandardModel.EMBEDDING.preferred(directory));
         }
     }
 

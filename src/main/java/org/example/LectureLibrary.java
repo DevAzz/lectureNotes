@@ -744,7 +744,7 @@ final class LectureLibrary implements AutoCloseable {
 
     synchronized LocalProcessing.Whisper whisperSettings() throws SQLException {
         var bundled = LocalProcessing.bundledWhisper(false);
-        if (!bundled.available()) bundled = LocalProcessing.bundledWhisper(true);
+        if (!Files.isRegularFile(bundled.executable())) bundled = LocalProcessing.bundledWhisper(true);
         Path executable = configuredPath("whisper_executable", "LECTURENOTES_WHISPER", bundled.executable());
         Path model = configuredPath("whisper_model", "LECTURENOTES_WHISPER_MODEL", bundled.model());
         boolean cpu = Boolean.parseBoolean(setting("whisper_cpu", Boolean.toString(bundled.cpu())));

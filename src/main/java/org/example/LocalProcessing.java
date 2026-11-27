@@ -79,8 +79,8 @@ final class LocalProcessing {
             Path location = Path.of(LocalProcessing.class.getProtectionDomain().getCodeSource().getLocation().toURI());
             Path directory = (Files.isDirectory(location) ? location : location.getParent()).resolve("whisper");
             Path runtime = cpu ? directory : directory.resolve("cuda");
-            Path full = directory.resolve("ggml-large-v3.bin");
-            Path model = Files.isRegularFile(full) ? full : directory.resolve("ggml-large-v3-turbo-q5_0.bin");
+            Path full = StandardModel.FULL.preferred(directory);
+            Path model = Files.isRegularFile(full) ? full : StandardModel.TURBO.preferred(directory);
             return new Whisper(runtime.resolve("whisper-cli.exe"), model, cpu);
         } catch (URISyntaxException error) {
             throw new IllegalStateException("Не удалось определить путь к Whisper.", error);

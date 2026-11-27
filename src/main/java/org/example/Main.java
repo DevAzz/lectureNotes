@@ -10,10 +10,11 @@ public class Main {
         if (args.length == 1 && args[0].equals("--check")) {
             System.out.println("JDK " + Runtime.version().feature() + ", audio helper: " + Capture.helper());
             var whisper = LocalProcessing.bundledWhisper(false);
-            if (!whisper.available() || !LocalProcessing.bundledWhisper(true).available()) {
-                throw new java.io.IOException("Bundled Whisper CPU/CUDA CLI or model is missing.");
+            if (!java.nio.file.Files.isRegularFile(whisper.executable())
+                    || !java.nio.file.Files.isRegularFile(LocalProcessing.bundledWhisper(true).executable())) {
+                throw new java.io.IOException("Bundled Whisper CPU/CUDA CLI is missing.");
             }
-            System.out.println("Whisper model: " + whisper.model().getFileName());
+            System.out.println("Whisper CPU/CUDA CLI available.");
             LectureLibrary.checkDriver();
             var javafx = Platform.class.getModule().getDescriptor();
             System.out.println("SQLite FTS5 and RussianAnalyzer started. JavaFX: "

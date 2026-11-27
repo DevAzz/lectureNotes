@@ -6,7 +6,7 @@ if ($AppDirectory) {
     $app = (Resolve-Path -LiteralPath $AppDirectory).Path
 } else {
     & (Join-Path $PSScriptRoot 'build.ps1')
-    $app = Join-Path $project 'target/standalone-app'
+    $app = Join-Path $project 'target/standalone-runtime'
 }
 $work = Join-Path $project ('target/meeting-check/' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work -Force | Out-Null

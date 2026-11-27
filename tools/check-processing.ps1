@@ -7,7 +7,7 @@ $fixture = & (Join-Path $PSScriptRoot 'check-audio.ps1')
 $work = Join-Path $project ('target/processing-check/' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 
-$jar = Join-Path $project 'target/standalone-app/lecture-notes.jar'
+$jar = Join-Path $project 'target/standalone-runtime/lecture-notes.jar'
 $fixtureSource = Join-Path $project 'tools/fixtures/ProcessingCheck.java'
 & javac --release 25 -encoding UTF-8 -cp $jar -d $work $fixtureSource
 if ($LASTEXITCODE -ne 0) { throw "Processing check compilation failed ($LASTEXITCODE)." }
