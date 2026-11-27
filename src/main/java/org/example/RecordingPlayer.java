@@ -32,6 +32,8 @@ final class RecordingPlayer extends VBox {
         controls.setAlignment(Pos.CENTER_LEFT);
         HBox.setHgrow(volume, Priority.ALWAYS);
         getChildren().addAll(position, controls);
+        visibleProperty().bind(position.maxProperty().greaterThan(0));
+        managedProperty().bind(visibleProperty());
         setChunks(List.of());
         play.setOnAction(event -> {
             if (playing) {

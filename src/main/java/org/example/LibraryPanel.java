@@ -123,8 +123,8 @@ final class LibraryPanel extends VBox {
         var details = new VBox(8, new Label("Черновик живой расшифровки"), liveDraft,
                 new HBox(8, editDraftLine, removeAudio), gaps);
         VBox.setVgrow(liveDraft, Priority.ALWAYS);
-        var playPane = new BorderPane(details, summary, null, player, null);
-        playPane.setPadding(new Insets(10));
+        var recordingPane = new BorderPane(details, summary, null, null, null);
+        recordingPane.setPadding(new Insets(10));
         BorderPane.setMargin(details, new Insets(8, 0, 8, 0));
         gaps.setEditable(false);
         gaps.setWrapText(true);
@@ -132,12 +132,15 @@ final class LibraryPanel extends VBox {
         gaps.setPrefRowCount(2);
         gaps.visibleProperty().bind(gaps.textProperty().isNotEmpty());
         gaps.managedProperty().bind(gaps.visibleProperty());
-        recordingTab = new Tab("Запись", playPane);
+        recordingTab = new Tab("Запись", recordingPane);
         transcriptTab = new Tab("Расшифровка", documents.transcriptPanel());
         noteTab = new Tab("Конспект", documents.notePanel());
         tabs.getTabs().addAll(recordingTab, transcriptTab, noteTab);
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-        var split = new SplitPane(results, tabs);
+        var lecturePane = new BorderPane(tabs);
+        player.setPadding(new Insets(10));
+        lecturePane.setBottom(player);
+        var split = new SplitPane(results, lecturePane);
         split.setDividerPositions(0.31);
         VBox.setVgrow(split, Priority.ALWAYS);
 
