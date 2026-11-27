@@ -59,6 +59,7 @@ final class SettingsPanel extends VBox {
     private final Button editProfile = new Button("Изменить");
     private final Button removeProfile = new Button("Удалить");
     private final Button primaryProfile = new Button("Сделать основным");
+    private final ComboBox<String> testModel = new ComboBox<>();
     private final Button testProfile = new Button("Проверить соединение");
 
     private final TextField whisperExecutable = new TextField();
@@ -112,7 +113,13 @@ final class SettingsPanel extends VBox {
                 setText(empty || item == null ? null : profileCard(item));
             }
         });
-        profiles.getSelectionModel().selectedItemProperty().addListener((obs, prior, value) -> updateButtons());
+        testModel.setId("profile-test-model");
+        testModel.setPrefWidth(280);
+        profiles.getSelectionModel().selectedItemProperty().addListener((obs, prior, value) -> {
+            testModel.getItems().setAll(value == null ? List.of() : value.modelIds());
+            testModel.setValue(value == null ? null : value.modelIds().getFirst());
+            updateButtons();
+        });
         addProfile.setOnAction(event -> editProfile(null));
         editProfile.setOnAction(event -> editProfile(profiles.getSelectionModel().getSelectedItem()));
         removeProfile.setOnAction(event -> removeProfile());
@@ -187,11 +194,16 @@ final class SettingsPanel extends VBox {
         });
         diarizationForm.add(resetModels, 1, 2);
 
+        var testModelLabel = new Label("Модель для проверки");
+        testModelLabel.setLabelFor(testModel);
+        var testModelRow = new HBox(8, testModelLabel, testModel, testProfile);
+        testModelRow.setAlignment(Pos.CENTER_LEFT);
         var body = new VBox(12,
                 appearanceCard(),
                 card("Модели и профили генерации",
                         profiles,
-                        new HBox(8, addProfile, editProfile, removeProfile, primaryProfile, testProfile),
+                        new HBox(8, addProfile, editProfile, removeProfile, primaryProfile),
+                        testModelRow,
                         profileStatus),
                 card("Распознавание речи (Whisper)", language,
                         modelRow(StandardModel.TURBO, whisperModel),
@@ -345,7 +357,10 @@ final class SettingsPanel extends VBox {
                     if (prior != null) {
                         profiles.getItems().stream().filter(item -> item.id() == prior.id())
                                 .findFirst().ifPresent(profiles.getSelectionModel()::select);
-                    } else if (!savedProfiles.isEmpty()) profiles.getSelectionModel().selectFirst();
+                    }
+                    if (profiles.getSelectionModel().isEmpty() && !savedProfiles.isEmpty()) {
+                        profiles.getSelectionModel().selectFirst();
+                    }
                     if (!writing) {
                         showModels(models);
                         savedPaths.get(segmentationModel).set(models.segmentation().toString());
@@ -367,7 +382,7 @@ final class SettingsPanel extends VBox {
                             + (stats.pendingCleanup() > 0
                                     ? "\nВ очереди очистки файлов: " + stats.pendingCleanup() : ""));
                     aboutStatus.setText("JDK " + Runtime.version().feature() + " · JavaFX " + javafxVersion()
-                            + " · библиотека SQLite, схема v6"
+                            + " · библиотека SQLite, схема v" + LibrarySchema.VERSION
                             + "\nWhisper: " + whisper.executable().getFileName() + " · "
                             + whisper.model().getFileName() + (whisper.cpu() ? " · CPU" : " · CUDA")
                             + "\nПомощник записи: " + helperPath());
@@ -396,7 +411,8 @@ final class SettingsPanel extends VBox {
 
     private static String profileCard(LectureLibrary.Profile item) {
         return item.name() + (item.isDefault() ? " · основной" : item.cloud() ? " · внешний" : " · локальный")
-                + "\n" + item.baseUrl() + " · " + item.modelId()
+                + "\n" + item.baseUrl() + " · " + item.modelIds().getFirst()
+                + (item.modelIds().size() > 1 ? " · моделей: " + item.modelIds().size() : "")
                 + "\nконтекст " + item.contextTokens() + " токенов · ответ "
                 + (item.answerTokens() > 0 ? "до " + item.answerTokens() : "без лимита")
                 + " · тайм-аут " + item.timeoutSeconds() + " с · "
@@ -409,7 +425,13 @@ final class SettingsPanel extends VBox {
         kind.getItems().setAll("Локальный (http://127.0.0.1)", "Внешний (https://…)");
         kind.getSelectionModel().select(item != null && item.cloud() ? 1 : 0);
         var url = new TextField(item == null ? "http://127.0.0.1:47831/v1" : item.baseUrl());
-        var model = new TextField(item == null ? "" : item.modelId());
+        var models = new TextArea(item == null ? "" : String.join("\n", item.modelIds()));
+        models.setId("profile-model-ids");
+        models.setPrefRowCount(3);
+        models.setPrefColumnCount(28);
+        var modelHint = new Label("По одному ID в строке. Первая модель используется по умолчанию.");
+        modelHint.getStyleClass().add("note-hint");
+        modelHint.setWrapText(true);
         var context = new TextField(item == null ? "8192" : Integer.toString(item.contextTokens()));
         var answer = new TextField(item == null ? "0" : Integer.toString(item.answerTokens()));
         var timeout = new TextField(item == null ? "900" : Integer.toString(item.timeoutSeconds()));
@@ -425,20 +447,21 @@ final class SettingsPanel extends VBox {
         DesktopDialogs.field(form, 0, "Название профиля", name);
         DesktopDialogs.field(form, 1, "Тип профиля", kind);
         DesktopDialogs.field(form, 2, "Базовый URL", url);
-        DesktopDialogs.field(form, 3, "ID модели", model);
-        DesktopDialogs.field(form, 4, "Ключ API", secret);
-        form.add(clearSecret, 1, 5);
-        DesktopDialogs.field(form, 6, "Бюджет контекста, токенов", context);
-        DesktopDialogs.field(form, 7, "Лимит ответа, токенов (0 — без лимита)", answer);
-        DesktopDialogs.field(form, 8, "Тайм-аут запроса, секунд", timeout);
-        form.add(asDefault, 1, 9);
+        DesktopDialogs.field(form, 3, "ID моделей", models);
+        form.add(modelHint, 1, 4);
+        DesktopDialogs.field(form, 5, "Ключ API", secret);
+        form.add(clearSecret, 1, 6);
+        DesktopDialogs.field(form, 7, "Бюджет контекста, токенов", context);
+        DesktopDialogs.field(form, 8, "Лимит ответа, токенов (0 — без лимита)", answer);
+        DesktopDialogs.field(form, 9, "Тайм-аут запроса, секунд", timeout);
+        form.add(asDefault, 1, 10);
         if (!DesktopDialogs.form(owner, item == null ? "Новый профиль модели" : "Изменить профиль модели", form)) return;
 
         Long id = item == null ? null : item.id();
         boolean cloud = kind.getSelectionModel().getSelectedIndex() == 1;
         String title = name.getText();
         String base = url.getText();
-        String modelId = model.getText();
+        var modelIds = models.getText().lines().toList();
         String typed = secret.getText().strip();
         if (!typed.isEmpty() && !typed.chars().allMatch(symbol -> symbol >= 0x21 && symbol <= 0x7e)) {
             say(profileStatus, "Ключ API должен быть ASCII и не содержать пробелов.");
@@ -454,7 +477,7 @@ final class SettingsPanel extends VBox {
             if (!typed.isBlank()) saved = InvitationSecret.protectText(typed);
             else if (erase) saved = null;
             else saved = id == null ? null : library.profileSecret(id);
-            library.saveProfile(id, title, base, modelId, cloud, contextTokens, answerTokens, timeoutSeconds,
+            library.saveProfile(id, title, base, modelIds, cloud, contextTokens, answerTokens, timeoutSeconds,
                     saved, makeDefault);
         }, this::load);
     }
@@ -469,18 +492,19 @@ final class SettingsPanel extends VBox {
 
     private void testConnection() {
         var item = profiles.getSelectionModel().getSelectedItem();
-        if (item == null) return;
+        String modelId = testModel.getValue();
+        if (item == null || modelId == null) return;
         writing = true;
         updateButtons();
-        say(profileStatus, "Проверяем соединение с «" + item.name() + "»…");
+        say(profileStatus, "Проверяем модель «" + modelId + "»…");
         worker.execute(() -> {
             try {
                 String secret = item.hasSecret() ? InvitationSecret.unprotectText(library.profileSecret(item.id())) : "";
-                String reply = LocalProcessing.probe(item.llm(secret));
+                String reply = LocalProcessing.probe(item.llm(modelId, secret));
                 Platform.runLater(() -> {
                     if (closed) return;
                     writing = false;
-                    say(profileStatus, "Профиль «" + item.name() + "» отвечает. " + reply);
+                    say(profileStatus, "Модель «" + modelId + "» отвечает. " + reply);
                     updateButtons();
                 });
             } catch (Exception error) {
@@ -594,6 +618,7 @@ final class SettingsPanel extends VBox {
         editProfile.setDisable(!ready || !selected);
         removeProfile.setDisable(!ready || !selected);
         primaryProfile.setDisable(!ready || !selected);
+        testModel.setDisable(!ready || !selected);
         testProfile.setDisable(!ready || !selected);
         saveWhisper.setDisable(!ready);
         saveDiarization.setDisable(!ready);

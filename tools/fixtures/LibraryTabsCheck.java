@@ -3,25 +3,32 @@ package org.example;
 import javafx.application.Platform;
 import javafx.event.ActionEvent;
 import javafx.scene.Node;
+import javafx.scene.Parent;
 import javafx.scene.Scene;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
+import javafx.scene.control.DialogPane;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListView;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.Region;
 import javafx.scene.paint.Color;
 import javafx.stage.Stage;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /** Проверка вкладок «Коллекции» и «Настройки» и их связи с библиотекой. */
 public final class LibraryTabsCheck {
@@ -80,8 +87,10 @@ public final class LibraryTabsCheck {
     private static void taskBarChecks(Path work, LibraryLocation location) throws Exception {
         var library = new LectureLibrary(work);
         var lecture = library.lecture(library.createLecture("История", "Реформы", "", ""));
+        long transcript = library.saveTranscript(lecture.id(),
+                List.of(new LocalProcessing.Segment(0, 1_000, "Начало записи.")));
         String markdown = "Первый абзац.\n\n".repeat(90) + "Говорим о **производной** функции.";
-        library.saveNote(lecture.id(), null, markdown, false);
+        library.saveNote(lecture.id(), transcript, markdown, false);
         var window = new AtomicReference<Stage>();
         fx(() -> {
             new DesktopWindow(work, library, location).show();
@@ -148,9 +157,78 @@ public final class LibraryTabsCheck {
             return preview.lookup(".search-highlight") != null && preview.getVvalue() > 0.5;
         }, "double click scrolls to and highlights the match");
         awaitTrue(() -> window.get().getScene().lookup(".search-highlight") == null, "highlight expires");
+        profileDialogChecks((TabPane) window.get().getScene().lookup(".tab-pane"), library);
         fx(() -> window.get().fireEvent(new javafx.stage.WindowEvent(window.get(),
                 javafx.stage.WindowEvent.WINDOW_CLOSE_REQUEST)));
         awaitTrue(() -> !window.get().isShowing(), "task window closed");
+    }
+
+    private static void profileDialogChecks(TabPane sections, LectureLibrary library) throws Exception {
+        var settings = (Parent) sections.getTabs().get(3).getContent();
+        fx(() -> sections.getSelectionModel().select(3));
+        awaitTrue(() -> ((ComboBox<?>) settings.lookup("#profile-test-model")).getItems().equals(List.of("iq3_s")),
+                "the settings initially show the default model");
+        fx(() -> interactWithDialog(button(settings, "Изменить"), ButtonType.OK, pane -> {
+            var models = (TextArea) pane.lookup("#profile-model-ids");
+            require(models.getText().equals("iq3_s"), "the edit form loads the saved model IDs");
+            models.setText("iq3_s\nlocal/alternate");
+        }));
+        awaitTrue(() -> ((ComboBox<?>) settings.lookup("#profile-test-model")).getItems()
+                        .equals(List.of("iq3_s", "local/alternate")),
+                "the connection check offers both saved models");
+        library.saveProfile(null, "Внешний API", "https://example.com/v1", List.of("provider/model"),
+                true, 8192, 0, 30, null, false);
+        fx(() -> {
+            sections.getSelectionModel().select(1);
+            var tabs = (TabPane) sections.getSelectionModel().getSelectedItem().getContent().lookup(".tab-pane");
+            for (String tab : List.of("Текст", "Конспект")) {
+                tabs.getSelectionModel().select(tabs.getTabs().stream()
+                        .filter(item -> item.getText().equals(tab)).findFirst().orElseThrow());
+                tabs.applyCss();
+                String action = tab.equals("Текст") ? "Разбить на абзацы" : "Сформировать конспект";
+                interactWithDialog(button((Parent) tabs.getSelectionModel().getSelectedItem().getContent(), action),
+                        ButtonType.CANCEL, pane -> {
+                            var profile = (ComboBox<?>) pane.lookup("#generation-profile");
+                            var model = (ComboBox<?>) pane.lookup("#generation-model");
+                            require(model.getItems().equals(List.of("iq3_s", "local/alternate"))
+                                            && model.getValue().equals("iq3_s"),
+                                    "generation offers the edited model list without restarting");
+                            model.getSelectionModel().select(1);
+                            require(model.getValue().equals("local/alternate"), "a user can choose the second model");
+                            profile.requestFocus();
+                            profile.fireEvent(new KeyEvent(KeyEvent.KEY_PRESSED, "", "", KeyCode.DOWN,
+                                    false, false, false, false));
+                            require(model.getItems().equals(List.of("provider/model"))
+                                            && model.getValue().equals("provider/model"),
+                                    "switching profiles updates the model and its default");
+                        });
+            }
+        });
+    }
+
+    private static void interactWithDialog(Button trigger, ButtonType action, Consumer<DialogPane> inspect) {
+        require(trigger != null && !trigger.isDisabled(), "the dialog action is available");
+        var result = new CompletableFuture<Void>();
+        Platform.runLater(() -> {
+            var pane = Stage.getWindows().stream().filter(window -> window.isShowing() && window.getScene() != null)
+                    .map(window -> window.getScene().getRoot()).filter(DialogPane.class::isInstance)
+                    .map(DialogPane.class::cast).findFirst().orElse(null);
+            if (pane == null) {
+                result.completeExceptionally(new AssertionError("dialog pane missing"));
+                return;
+            }
+            try {
+                inspect.accept(pane);
+                ((Button) pane.lookupButton(action)).fire();
+                result.complete(null);
+            } catch (Throwable failure) {
+                ((Button) pane.lookupButton(ButtonType.CANCEL)).fire();
+                result.completeExceptionally(failure);
+            }
+        });
+        trigger.fire();
+        require(result.isDone(), "the dialog opened");
+        result.join();
     }
 
     private static void seed(LectureLibrary library, Path work) throws Exception {
@@ -179,7 +257,7 @@ public final class LibraryTabsCheck {
         require(library.noteSystemPrompt().equals(LocalProcessing.DEFAULT_SYSTEM_PROMPT)
                 && library.readingPrompt().equals(LocalProcessing.READING_PROMPT), "saved defaults use the new wording");
         library.saveNoteSettings("Собери конспект свободным текстом.", 25);
-        library.saveProfile(null, "Внешний API", "https://example.com/v1", "большая модель", true,
+        library.saveProfile(null, "Внешний API", "https://example.com/v1", List.of("большая модель"), true,
                 16_000, 1_000, 300, null, false);
     }
 
@@ -379,7 +457,10 @@ public final class LibraryTabsCheck {
     }
 
     private static Button button(String label) {
-        var root = settingsPanel != null ? settingsPanel : subjectsPanel;
+        return button(settingsPanel != null ? settingsPanel : subjectsPanel, label);
+    }
+
+    private static Button button(Parent root, String label) {
         for (var node : root.lookupAll(".button")) {
             var button = (Button) node;
             if (label.equals(button.getText())) return button;

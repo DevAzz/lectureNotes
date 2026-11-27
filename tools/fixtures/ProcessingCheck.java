@@ -7,6 +7,7 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.DriverManager;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -28,6 +29,7 @@ public final class ProcessingCheck {
         }
         String lectureId;
         String customPrompt = "Собери конспект свободным текстом.\nМожно без ссылок.";
+        checkProfileMigration(Files.createDirectory(work.resolve("legacy-profiles")));
         try (var library = new LectureLibrary(work)) {
             lectureId = library.createLecture("Математика", "Скорость изменения", "", "");
             var recording = library.startRecording(lectureId, Instant.now(), "Контрольная запись");
@@ -94,21 +96,28 @@ public final class ProcessingCheck {
 
             var seededProfiles = library.profiles();
             check(seededProfiles.size() == 1 && seededProfiles.getFirst().isDefault()
-                            && "iq3_s".equals(seededProfiles.getFirst().modelId()),
+                            && seededProfiles.getFirst().modelIds().equals(List.of("iq3_s")),
                     "A fresh library offers the local model profile");
-            long external = library.saveProfile(null, "Внешний API", "https://example.com/v1", "большая модель",
+            long external = library.saveProfile(null, "Внешний API", "https://example.com/v1",
+                    List.of(" большая модель ", "", "backup/model:free", "большая модель"),
                     true, 16_000, 1_000, 300, null, true);
             check(library.profiles().size() == 2, "Profile created from the settings tab");
             check(library.profiles().stream().anyMatch(item -> item.id() == external && item.isDefault()
-                            && item.cloud() && item.answerTokens() == 1_000),
-                    "The saved profile became the default one");
+                            && item.cloud() && item.answerTokens() == 1_000
+                            && item.modelIds().equals(List.of("большая модель", "backup/model:free"))),
+                    "The default profile keeps distinct model IDs in input order");
             library.setDefaultProfile(seededProfiles.getFirst().id());
             check(library.profiles().stream().filter(LectureLibrary.Profile::isDefault).count() == 1,
                     "Only one profile stays default");
             try {
-                library.saveProfile(null, "Неверный адрес", "ftp://example.com/v1", "модель", false, 100, 0, 30,
+                library.saveProfile(null, "Неверный адрес", "ftp://example.com/v1", List.of("модель"), false, 100, 0, 30,
                         null, false);
                 throw new AssertionError("An invalid profile address was accepted.");
+            } catch (java.io.IOException expected) { }
+            try {
+                library.saveProfile(external, "Внешний API", "https://example.com/v1",
+                        List.of(" "), true, 16_000, 1_000, 300, null, false);
+                throw new AssertionError("A profile without models was accepted.");
             } catch (java.io.IOException expected) { }
             library.deleteProfile(external);
             check(library.profiles().size() == 1 && library.profiles().getFirst().isDefault(),
@@ -216,6 +225,10 @@ public final class ProcessingCheck {
             server.start();
             try {
                 URI api = URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/v1");
+                var originalProfile = library.profiles().getFirst();
+                library.saveProfile(originalProfile.id(), originalProfile.name(), api.toString(),
+                        List.of("iq3_s", "capped-note"), false, 8192, 256, 900, null, true);
+                var updatedProfile = library.profiles().getFirst();
                 var local = new LocalProcessing.Llm(api.toString(), "iq3_s", "", 0, 900, false);
                 String reading = LocalProcessing.formatReading(segments, local, LocalProcessing.READING_PROMPT,
                         Duration.ofSeconds(10));
@@ -250,9 +263,9 @@ public final class ProcessingCheck {
                 check(free.equals("Свободный конспект.") && attempts.get() == 4 && requestsWithoutTokenCap.get() == 4,
                         "Provider truncation splits the part, and free-form text is accepted without a token cap");
                 String capped = LocalProcessing.generate("Скорость изменения", segments,
-                        new LocalProcessing.Llm(api.toString(), "capped-note", "", 256, 900, false), "", customPrompt,
+                        updatedProfile.llm(updatedProfile.modelIds().getLast(), ""), "", customPrompt,
                         Duration.ofSeconds(10));
-                check(capped.equals("Конспект с лимитом."), "Answer budget reaches the request as max_tokens");
+                check(capped.equals("Конспект с лимитом."), "The request uses the selected second model and profile limit");
                 String keyed = LocalProcessing.generate("Скорость изменения", segments,
                         new LocalProcessing.Llm(api.toString(), "keyed-note", "sk-test-700", 0, 900, false), "",
                         customPrompt, Duration.ofSeconds(10));
@@ -323,8 +336,10 @@ public final class ProcessingCheck {
             check(reopened.noteTimeLimitMinutes() == 17, "Time budget survives restart");
             check(reopened.whisperSettings().cpu() && "ru".equals(reopened.whisperLanguage()),
                     "Whisper settings survive restart");
-            check(reopened.profiles().size() == 1 && reopened.profiles().getFirst().isDefault(),
-                    "Model profiles survive restart");
+            var profiles = reopened.profiles();
+            check(profiles.size() == 1 && profiles.getFirst().isDefault()
+                            && profiles.getFirst().modelIds().equals(List.of("iq3_s", "capped-note")),
+                    "The default profile and model order survive restart");
             check(reopened.subjects().stream().anyMatch(item -> item.name().equals("Физика")
                             && item.description().equals("Механика и поля")), "Subjects survive restart");
             check(reopened.liveSegments(lectureId).getFirst().segment().text().equals("Исправленная черновая реплика."),
@@ -344,6 +359,29 @@ public final class ProcessingCheck {
                     && Files.isDirectory(selectedFolder.resolve("recordings")), "Chosen folder holds the library and recordings");
         }
         System.out.println("Playback data, deadline, prompt, edits, WAV-only deletion and library location verified.");
+    }
+
+    private static void checkProfileMigration(Path work) throws Exception {
+        try (var db = DriverManager.getConnection("jdbc:sqlite:" + work.resolve("library.sqlite"));
+             var statement = db.createStatement()) {
+            for (String sql : LibrarySchema.V6) statement.execute(sql);
+            statement.execute("""
+                    INSERT INTO model_profile(id, name, name_key, base_url, model_id, secret_dpapi, cloud,
+                                              context_tokens, answer_tokens, timeout_seconds, is_default)
+                    VALUES (17, 'Старый профиль', 'старый профиль', 'https://example.com/v1', 'provider/m, v1',
+                            X'010203', 1, 16000, 512, 30, 1)
+                    """);
+            statement.execute("PRAGMA user_version = 7");
+        }
+        try (var library = new LectureLibrary(work)) {
+            var profile = library.profiles().getFirst();
+            check(profile.id() == 17 && profile.isDefault() && profile.cloud()
+                            && profile.baseUrl().equals("https://example.com/v1") && profile.contextTokens() == 16000
+                            && profile.answerTokens() == 512 && profile.timeoutSeconds() == 30
+                            && profile.modelIds().equals(List.of("provider/m, v1")) && profile.hasSecret()
+                            && java.util.Arrays.equals(library.profileSecret(17), new byte[]{1, 2, 3}),
+                    "The previous schema migrates its profile and encrypted key");
+        }
     }
 
     private static void check(boolean passed, String name) {

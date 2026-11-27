@@ -30,11 +30,11 @@ final class LectureLibrary implements AutoCloseable {
         @Override public String toString() { return name; }
     }
 
-    record Profile(long id, String name, String baseUrl, String modelId, boolean cloud, int contextTokens,
+    record Profile(long id, String name, String baseUrl, List<String> modelIds, boolean cloud, int contextTokens,
                    int answerTokens, int timeoutSeconds, boolean isDefault, boolean hasSecret) {
         @Override public String toString() { return name; }
 
-        LocalProcessing.Llm llm(String secret) {
+        LocalProcessing.Llm llm(String modelId, String secret) {
             return new LocalProcessing.Llm(baseUrl, modelId, secret == null ? "" : secret, answerTokens,
                     timeoutSeconds, cloud);
         }
@@ -118,8 +118,10 @@ final class LectureLibrary implements AutoCloseable {
             rows.next();
             version = rows.getInt(1);
         }
-        if (version == 7) return;
-        if (version < 0 || version > 7) throw new IOException("Библиотека создана более новой версией приложения.");
+        if (version == LibrarySchema.VERSION) return;
+        if (version < 0 || version > LibrarySchema.VERSION) {
+            throw new IOException("Библиотека создана более новой версией приложения.");
+        }
         transaction(() -> {
             try (var statement = db.createStatement()) {
                 if (version == 0) for (String sql : LibrarySchema.V1) statement.execute(sql);
@@ -127,12 +129,15 @@ final class LectureLibrary implements AutoCloseable {
                 if (version < 3) for (String sql : LibrarySchema.V3) statement.execute(sql);
                 if (version < 4) for (String sql : LibrarySchema.V4) statement.execute(sql);
                 if (version < 5) for (String sql : LibrarySchema.V5) statement.execute(sql);
-                if (version < 6) for (String sql : LibrarySchema.V6) statement.execute(sql);
+                if (version < 6) {
+                    for (String sql : LibrarySchema.V6) statement.execute(sql);
+                    seedDefaultProfile();
+                }
                 if (version < 7) statement.execute("ALTER TABLE transcript ADD COLUMN reading_text TEXT");
+                if (version < 8) for (String sql : LibrarySchema.V8) statement.execute(sql);
                 if (version == 0) importPrototype();
-                statement.execute("PRAGMA user_version = 7");
+                statement.execute("PRAGMA user_version = " + LibrarySchema.VERSION);
             }
-            if (version < 6) seedDefaultProfile();
             return null;
         });
     }
@@ -644,17 +649,27 @@ final class LectureLibrary implements AutoCloseable {
     synchronized List<Profile> profiles() throws SQLException {
         var result = new ArrayList<Profile>();
         try (var sql = prepare("""
-                SELECT id, name, base_url, model_id, cloud, context_tokens, answer_tokens, timeout_seconds,
+                SELECT id, name, base_url, cloud, context_tokens, answer_tokens, timeout_seconds,
                        is_default, secret_dpapi IS NOT NULL
                 FROM model_profile ORDER BY is_default DESC, name_key, id
                 """); var rows = sql.executeQuery()) {
             while (rows.next()) {
-                result.add(new Profile(rows.getLong(1), rows.getString(2), rows.getString(3), rows.getString(4),
-                        rows.getInt(5) != 0, rows.getInt(6), rows.getInt(7), rows.getInt(8),
-                        rows.getInt(9) != 0, rows.getInt(10) != 0));
+                long id = rows.getLong(1);
+                result.add(new Profile(id, rows.getString(2), rows.getString(3), profileModels(id),
+                        rows.getInt(4) != 0, rows.getInt(5), rows.getInt(6), rows.getInt(7),
+                        rows.getInt(8) != 0, rows.getInt(9) != 0));
             }
         }
         return result;
+    }
+
+    private List<String> profileModels(long profileId) throws SQLException {
+        var models = new ArrayList<String>();
+        try (var sql = prepare("SELECT model_id FROM profile_model WHERE profile_id=? ORDER BY position", profileId);
+             var rows = sql.executeQuery()) {
+            while (rows.next()) models.add(rows.getString(1));
+        }
+        return List.copyOf(models);
     }
 
     synchronized byte[] profileSecret(long id) throws SQLException {
@@ -664,17 +679,18 @@ final class LectureLibrary implements AutoCloseable {
     }
 
     /** Сохраняет профиль. Секрет передаётся уже защищённым DPAPI, пустое значение очищает его. */
-    synchronized long saveProfile(Long id, String name, String baseUrl, String modelId, boolean cloud,
+    synchronized long saveProfile(Long id, String name, String baseUrl, List<String> modelIds, boolean cloud,
                                   int contextTokens, int answerTokens, int timeoutSeconds,
                                   byte[] secret, boolean makeDefault) throws SQLException, IOException {
         String title = required(name, "Введите название профиля.");
         if (title.length() > 120) throw new IOException("Название профиля слишком длинное.");
-        String model = required(modelId, "Укажите ID модели.");
+        var models = modelIds.stream().map(String::strip).filter(model -> !model.isEmpty()).distinct().toList();
+        if (models.isEmpty()) throw new IOException("Укажите хотя бы один ID модели.");
         if (contextTokens <= 0) throw new IOException("Бюджет контекста должен быть положительным.");
         if (answerTokens < 0) throw new IOException("Лимит ответа не может быть отрицательным.");
         if (timeoutSeconds <= 0) throw new IOException("Тайм-аут запроса должен быть положительным.");
         String address = baseUrl == null ? "" : baseUrl.strip();
-        LocalProcessing.endpoint(new LocalProcessing.Llm(address, model, "", answerTokens, timeoutSeconds, cloud));
+        LocalProcessing.endpoint(new LocalProcessing.Llm(address, models.getFirst(), "", answerTokens, timeoutSeconds, cloud));
         String key = RussianSearch.normalize(title);
         try (var sql = prepare("SELECT id FROM model_profile WHERE name_key=?", key); var rows = sql.executeQuery()) {
             if (rows.next() && (id == null || rows.getLong(1) != id)) {
@@ -684,16 +700,21 @@ final class LectureLibrary implements AutoCloseable {
         return transaction(() -> {
             long saved = id == null
                     ? insert("""
-                        INSERT INTO model_profile(name, name_key, base_url, model_id, secret_dpapi, context_tokens,
+                        INSERT INTO model_profile(name, name_key, base_url, secret_dpapi, context_tokens,
                             answer_tokens, timeout_seconds, cloud)
-                        VALUES (?,?,?,?,?,?,?,?,?) RETURNING id
-                        """, title, key, address, model, secret, contextTokens, answerTokens, timeoutSeconds,
+                        VALUES (?,?,?,?,?,?,?,?) RETURNING id
+                        """, title, key, address, secret, contextTokens, answerTokens, timeoutSeconds,
                         cloud ? 1 : 0)
                     : insert("""
-                        UPDATE model_profile SET name=?, name_key=?, base_url=?, model_id=?, secret_dpapi=?,
+                        UPDATE model_profile SET name=?, name_key=?, base_url=?, secret_dpapi=?,
                             context_tokens=?, answer_tokens=?, timeout_seconds=?, cloud=? WHERE id=? RETURNING id
-                        """, title, key, address, model, secret, contextTokens, answerTokens, timeoutSeconds,
+                        """, title, key, address, secret, contextTokens, answerTokens, timeoutSeconds,
                         cloud ? 1 : 0, id);
+            update("DELETE FROM profile_model WHERE profile_id=?", saved);
+            for (int position = 0; position < models.size(); position++) {
+                update("INSERT INTO profile_model(profile_id, position, model_id) VALUES (?,?,?)",
+                        saved, position, models.get(position));
+            }
             if (makeDefault) promoteProfile(saved);
             ensureProfileDefault();
             return saved;

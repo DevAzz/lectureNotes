@@ -3,6 +3,8 @@ package org.example;
 import java.util.List;
 
 final class LibrarySchema {
+    static final int VERSION = 8;
+
     static final String V2 = "ALTER TABLE lecture ADD COLUMN invitation_dpapi BLOB";
     static final List<String> V3 = List.of(
             """
@@ -42,6 +44,19 @@ final class LibrarySchema {
             )
             """,
             "CREATE UNIQUE INDEX model_profile_default ON model_profile(is_default) WHERE is_default=1"
+    );
+    static final List<String> V8 = List.of(
+            """
+            CREATE TABLE profile_model (
+                profile_id INTEGER NOT NULL REFERENCES model_profile(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                model_id TEXT NOT NULL,
+                PRIMARY KEY (profile_id, position),
+                UNIQUE (profile_id, model_id)
+            )
+            """,
+            "INSERT INTO profile_model(profile_id, position, model_id) SELECT id, 0, model_id FROM model_profile",
+            "ALTER TABLE model_profile DROP COLUMN model_id"
     );
 
     static final List<String> V1 = List.of(

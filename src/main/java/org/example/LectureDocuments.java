@@ -21,6 +21,7 @@ import javafx.stage.Window;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
@@ -73,7 +74,6 @@ final class LectureDocuments {
     private RussianSearch.Match pendingMatch;
     private boolean closed;
     private Runnable openSettings = () -> { };
-    private List<LectureLibrary.Profile> profiles = List.of();
     private LocalProcessing.Whisper whisper;
     private String systemPrompt = LocalProcessing.DEFAULT_SYSTEM_PROMPT;
     private int noteTimeLimitMinutes = LectureLibrary.DEFAULT_NOTE_TIME_LIMIT_MINUTES;
@@ -92,7 +92,6 @@ final class LectureDocuments {
             readingPrompt = library.readingPrompt();
             systemPrompt = library.noteSystemPrompt();
             noteTimeLimitMinutes = library.noteTimeLimitMinutes();
-            profiles = library.profiles();
         } catch (Exception error) {
             var bundled = LocalProcessing.bundledWhisper(false);
             if (!Files.isRegularFile(bundled.executable())) bundled = LocalProcessing.bundledWhisper(true);
@@ -117,13 +116,11 @@ final class LectureDocuments {
         worker.execute(() -> {
             try {
                 var engine = library.whisperSettings();
-                var savedProfiles = library.profiles();
                 String prompt = library.noteSystemPrompt();
                 int minutes = library.noteTimeLimitMinutes();
                 Platform.runLater(() -> {
                     if (closed) return;
                     whisper = engine;
-                    profiles = savedProfiles;
                     systemPrompt = prompt;
                     noteTimeLimitMinutes = minutes;
                     updateButtons();
@@ -385,11 +382,27 @@ final class LectureDocuments {
             DesktopDialogs.notice(owner, "Сохраните текущую редакцию перед генерацией.");
             return;
         }
+        List<LectureLibrary.Profile> profiles;
+        try {
+            profiles = library.profiles();
+        } catch (SQLException error) {
+            DesktopDialogs.notice(owner, "Не удалось загрузить профили генерации.");
+            return;
+        }
         if (profiles.isEmpty()) {
             DesktopDialogs.notice(owner, "Создайте профиль модели во вкладке «Настройки».");
             return;
         }
         var profile = new ComboBox<LectureLibrary.Profile>();
+        profile.setId("generation-profile");
+        profile.setMaxWidth(Double.MAX_VALUE);
+        var model = new ComboBox<String>();
+        model.setId("generation-model");
+        model.setMaxWidth(Double.MAX_VALUE);
+        profile.valueProperty().addListener((obs, prior, value) -> {
+            model.getItems().setAll(value == null ? List.of() : value.modelIds());
+            model.setValue(value == null ? null : value.modelIds().getFirst());
+        });
         profile.getItems().setAll(profiles);
         profiles.stream().filter(LectureLibrary.Profile::isDefault).findFirst()
                 .or(() -> profiles.stream().findFirst())
@@ -402,21 +415,23 @@ final class LectureDocuments {
         prompt.setPrefRowCount(8);
         var settings = DesktopDialogs.fields();
         DesktopDialogs.field(settings, 0, "Профиль модели", profile);
-        if (!forReading) DesktopDialogs.field(settings, 1, "Фокус", focus);
-        DesktopDialogs.field(settings, 2, "Лимит времени, мин", timeLimit);
-        DesktopDialogs.field(settings, 3, "Системный промпт", prompt);
+        DesktopDialogs.field(settings, 1, "Модель", model);
+        if (!forReading) DesktopDialogs.field(settings, 2, "Фокус", focus);
+        DesktopDialogs.field(settings, 3, "Лимит времени, мин", timeLimit);
+        DesktopDialogs.field(settings, 4, "Системный промпт", prompt);
         var hint = new Label(forReading ? "Модель выбирает места для абзацев. Все слова сохраняются." : "Основной профиль и промпт задаются во вкладке «Настройки».");
         hint.getStyleClass().add("note-hint");
-        settings.add(hint, 1, 4);
+        settings.add(hint, 1, 5);
         if (!DesktopDialogs.form(owner, forReading ? "Разбить текст на абзацы" : "Сформировать конспект", settings)) return;
         var chosen = profile.getValue();
-        if (chosen == null) {
-            DesktopDialogs.notice(owner, "Выберите профиль модели.");
+        String modelId = model.getValue();
+        if (chosen == null || modelId == null) {
+            DesktopDialogs.notice(owner, "Выберите профиль и модель.");
             return;
         }
         if (chosen.cloud() && !DesktopDialogs.confirm(owner, "Отправка текста во внешний сервис",
                 "Профиль «" + chosen.name() + "» обращается к " + chosen.baseUrl() + ".\n"
-                        + "Модель: " + chosen.modelId() + ".\n"
+                        + "Модель: " + modelId + ".\n"
                         + (forReading ? "Передаём текст расшифровки (" : "Передаём тему, фокус и текст расшифровки (") + transcript.getItems().size()
                         + " реплик). Звук не передаётся.")) return;
         String requestedFocus = focus.getText().strip();
@@ -441,7 +456,7 @@ final class LectureDocuments {
         if (forReading) {
             run(DocumentTaskBar.Operation.READING, () -> {
                 String secret = needsKey ? InvitationSecret.unprotectText(library.profileSecret(profileId)) : "";
-                String text = LocalProcessing.formatReading(source, chosen.llm(secret), requestedPrompt,
+                String text = LocalProcessing.formatReading(source, chosen.llm(modelId, secret), requestedPrompt,
                         java.time.Duration.ofMinutes(minutes));
                 library.saveReadingText(item.id(), sourceId, text);
                 library.saveSetting("reading_prompt", requestedPrompt);
@@ -459,7 +474,7 @@ final class LectureDocuments {
             String secret = needsKey ? InvitationSecret.unprotectText(library.profileSecret(profileId)) : "";
             library.saveNoteSettings(requestedPrompt, minutes);
             String markdown = LocalProcessing.generate(item.topic().isBlank() ? item.title() : item.topic(),
-                    source, chosen.llm(secret), requestedFocus, requestedPrompt, java.time.Duration.ofMinutes(minutes));
+                    source, chosen.llm(modelId, secret), requestedFocus, requestedPrompt, java.time.Duration.ofMinutes(minutes));
             library.saveNote(item.id(), sourceId, markdown, true);
             return () -> setNote(new LectureLibrary.Note(sourceId, markdown));
         }, true);
