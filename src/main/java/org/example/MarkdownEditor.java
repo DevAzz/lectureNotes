@@ -18,6 +18,7 @@ import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
@@ -114,26 +115,26 @@ final class MarkdownEditor extends BorderPane {
         updateStatus();
     }
 
-    private HBox toolbar() {
-        var box = new HBox(5, style, separator(),
-                tool("Ж", "Полужирный (Ctrl+B)", () -> wrap("**", "**")),
-                tool("И", "Курсив (Ctrl+I)", () -> wrap("*", "*")),
-                tool("Зач", "Зачёркнутый текст", () -> wrap("~~", "~~")),
+    private FlowPane toolbar() {
+        var box = new FlowPane(5, 5);
+        box.getStyleClass().add("note-toolbar");
+        box.setAlignment(Pos.CENTER_LEFT);
+        box.getChildren().setAll(style, separator(),
+                tool("Жирный", "Полужирный (Ctrl+B)", () -> wrap("**", "**")),
+                tool("Курсив", "Курсив (Ctrl+I)", () -> wrap("*", "*")),
+                tool("Зачёркнутый", "Зачёркнутый текст", () -> wrap("~~", "~~")),
                 tool("Код", "Строчный код (Ctrl+E)", () -> wrap("`", "`")),
                 tool("Ссылка", "Ссылка (Ctrl+K)", this::insertLink),
                 separator(),
-                tool("•", "Маркированный список", () -> prefixLines(BULLET)),
-                tool("1.", "Нумерованный список", this::numberLines),
-                tool("☑", "Строка-задача", () -> prefixLines(TASK)),
-                tool("❝", "Цитата", () -> prefixLines("> ")),
-                tool("</>", "Закреплённый блок кода", this::fence),
-                tool("▦", "Таблица Markdown", () -> insertBlock(
+                tool("Список", "Маркированный список", () -> prefixLines(BULLET)),
+                tool("Нумерация", "Нумерованный список", this::numberLines),
+                tool("Задача", "Строка-задача", () -> prefixLines(TASK)),
+                tool("Цитата", "Цитата", () -> prefixLines("> ")),
+                tool("Блок кода", "Закреплённый блок кода", this::fence),
+                tool("Таблица", "Таблица Markdown", () -> insertBlock(
                         "| Термин | Определение |\n| --- | --- |\n|  |  |\n|  |  |")),
-                tool("—", "Разделитель", () -> insertBlock("---")),
-                spacer(), timecode, modeButton("Правка", Mode.EDIT), modeButton("Два окна", Mode.SPLIT),
-                modeButton("Просмотр", Mode.PREVIEW));
-        box.getStyleClass().add("note-toolbar");
-        box.setAlignment(Pos.CENTER_LEFT);
+                tool("Разделитель", "Разделитель", () -> insertBlock("---")),
+                separator(), timecode, modeGroup());
         for (var tool : tools) tool.disableProperty().bind(editor.editableProperty().not());
         return box;
     }
@@ -150,6 +151,9 @@ final class MarkdownEditor extends BorderPane {
     private static Node separator() {
         var separator = new Separator(Orientation.VERTICAL);
         separator.getStyleClass().add("note-tool-separator");
+        separator.setMinHeight(22);
+        separator.setPrefHeight(22);
+        separator.setMaxHeight(22);
         return separator;
     }
 
@@ -157,6 +161,14 @@ final class MarkdownEditor extends BorderPane {
         var region = new Region();
         HBox.setHgrow(region, Priority.ALWAYS);
         return region;
+    }
+
+    /** Кнопки режима держатся вместе и переносятся на новую строку как группа. */
+    private HBox modeGroup() {
+        var box = new HBox(4, modeButton("Правка", Mode.EDIT), modeButton("Два окна", Mode.SPLIT),
+                modeButton("Просмотр", Mode.PREVIEW));
+        box.getStyleClass().add("note-modes");
+        return box;
     }
 
     private Button tool(String label, String tooltip, Runnable action) {

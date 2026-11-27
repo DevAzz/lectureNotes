@@ -7,6 +7,7 @@ import javafx.scene.control.Button;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.ToggleButton;
+import javafx.scene.layout.FlowPane;
 import javafx.scene.text.Text;
 import javafx.stage.Stage;
 
@@ -160,23 +161,31 @@ public final class MarkdownUiCheck {
             stage.show();
             require(count(editor, ".md-tool") >= 12, "formatting toolbar");
 
+            var toolbar = editor.lookup(".note-toolbar");
+            require(toolbar instanceof FlowPane, "toolbar that wraps to the next row");
+            var flow = (FlowPane) toolbar;
+            flow.resize(520, 80);
+            flow.layout();
+            require(flow.getChildren().stream().anyMatch(node -> node.getLayoutY() > 1),
+                    "toolbar buttons move to the next row when the window is narrow");
+
             area.setText("обычный текст");
             area.selectRange(0, area.getLength());
-            button(editor, "Ж").fire();
+            button(editor, "Жирный").fire();
             require("**обычный текст**".equals(area.getText()), "bold wrap: " + area.getText());
             area.selectRange(0, area.getLength());
-            button(editor, "Ж").fire();
+            button(editor, "Жирный").fire();
             require("обычный текст".equals(area.getText()), "bold unwrap: " + area.getText());
 
             area.setText("Заголовок раздела");
             area.selectRange(0, area.getLength());
-            button(editor, "•").fire();
+            button(editor, "Список").fire();
             require("- Заголовок раздела".equals(area.getText()), "list prefix: " + area.getText());
             area.selectRange(0, area.getLength());
-            button(editor, "❝").fire();
+            button(editor, "Цитата").fire();
             require("> Заголовок раздела".equals(area.getText()), "quote prefix: " + area.getText());
             area.selectRange(0, area.getLength());
-            button(editor, "❝").fire();
+            button(editor, "Цитата").fire();
             require("Заголовок раздела".equals(area.getText()), "quote removed: " + area.getText());
 
             area.setText("Пункт один");

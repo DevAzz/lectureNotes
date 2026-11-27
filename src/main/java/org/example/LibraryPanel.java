@@ -2,6 +2,7 @@ package org.example;
 
 import javafx.animation.PauseTransition;
 import javafx.application.Platform;
+import javafx.beans.binding.Bindings;
 import javafx.geometry.Insets;
 import javafx.scene.control.Button;
 import javafx.scene.control.ComboBox;
@@ -14,6 +15,7 @@ import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.BorderPane;
@@ -25,6 +27,7 @@ import javafx.util.Duration;
 
 import java.io.IOException;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +39,9 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 
 final class LibraryPanel extends VBox {
+    private static final DateTimeFormatter LIST_DATE = DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")
+            .withZone(ZoneId.systemDefault());
+
     private record Choice<T>(String label, T value) {
         @Override public String toString() { return label; }
     }
@@ -147,6 +153,10 @@ final class LibraryPanel extends VBox {
         until.setEditable(false);
         var reset = new Button("Сбросить фильтры");
         reset.setOnAction(event -> resetFilters());
+        reset.setTooltip(new Tooltip("Очистить поиск, предмет, период, конспект и состояние"));
+        reset.disableProperty().bind(Bindings.createBooleanBinding(this::filtersEmpty,
+                query.textProperty(), subject.valueProperty(), since.valueProperty(), until.valueProperty(),
+                note.valueProperty(), state.valueProperty()));
         var libraryFolder = new Button("Папка библиотеки");
         libraryFolder.setOnAction(event -> chooseLibraryFolder.run());
         var searchRow = new HBox(8, query, order, subjectsButton, libraryFolder);
@@ -204,6 +214,7 @@ final class LibraryPanel extends VBox {
 
     private void resetFilters() {
         applying = true;
+        query.clear();
         subject.getSelectionModel().selectFirst();
         note.getSelectionModel().selectFirst();
         state.getSelectionModel().selectFirst();
@@ -213,13 +224,22 @@ final class LibraryPanel extends VBox {
         refresh(false, null);
     }
 
+    /** Кнопка сброса нужна только когда задан поиск или хотя бы один фильтр. */
+    private boolean filtersEmpty() {
+        return query.getText().isBlank() && value(subject) == null && since.getValue() == null
+                && until.getValue() == null && value(note) == null && value(state) == null;
+    }
+
     private static String resultLabel(LectureLibrary.Hit hit) {
+        var lecture = hit.lecture();
         String location = switch (hit.kind()) {
             case CARD -> hit.excerpt();
             case SEGMENT -> RecordingPlayer.timestamp(hit.startMillis()) + " · " + hit.excerpt();
             case NOTE -> "Конспект · " + hit.excerpt();
         };
-        return location.isBlank() ? hit.lecture().label() : hit.lecture().label() + "\n" + location;
+        String when = LIST_DATE.format(lecture.created());
+        return location.isBlank() ? lecture.label() + "\n" + when
+                : lecture.label() + "\n" + when + " · " + location;
     }
 
     LocalProcessing.Whisper whisper() {
@@ -486,23 +506,31 @@ final class LibraryPanel extends VBox {
         var add = new Button("Создать");
         var editSubject = new Button("Изменить");
         var deleteSubject = new Button("Удалить");
-        var dialog = new javafx.scene.control.Dialog<Void>();
-        dialog.initOwner(owner);
-        dialog.setTitle("Предметы");
-        dialog.getDialogPane().getButtonTypes().add(javafx.scene.control.ButtonType.CLOSE);
-        dialog.getDialogPane().setContent(new VBox(8, choices, new HBox(8, add, editSubject, deleteSubject)));
+        var dialog = DesktopDialogs.panel(owner, "Предметы",
+                new VBox(8, choices, new HBox(8, add, editSubject, deleteSubject)),
+                javafx.scene.control.ButtonType.CLOSE);
         editSubject.disableProperty().bind(choices.valueProperty().isNull());
         deleteSubject.disableProperty().bind(choices.valueProperty().isNull());
-        add.setOnAction(event -> { dialog.close(); editSubject(null); });
-        editSubject.setOnAction(event -> { dialog.close(); editSubject(choices.getValue()); });
+        add.setOnAction(event -> afterClose(dialog, () -> editSubject(null)));
+        editSubject.setOnAction(event -> afterClose(dialog, () -> editSubject(choices.getValue())));
         deleteSubject.setOnAction(event -> {
             var item = choices.getValue();
-            dialog.close();
-            if (DesktopDialogs.confirm(owner, "Удаление предмета", "Удалить предмет «" + item.name() + "»?")) {
-                mutate(() -> library.deleteSubject(item.id()), () -> refresh(true, null));
-            }
+            afterClose(dialog, () -> {
+                if (DesktopDialogs.confirm(owner, "Удаление предмета", "Удалить предмет «" + item.name() + "»?")) {
+                    mutate(() -> library.deleteSubject(item.id()), () -> refresh(true, null));
+                }
+            });
         });
         dialog.showAndWait();
+    }
+
+    /**
+     * Новый диалог открывается уже после закрытия окна «Предметы»,
+     * иначе он может появиться без панели кнопок.
+     */
+    private static void afterClose(javafx.scene.control.Dialog<?> dialog, Runnable action) {
+        dialog.close();
+        Platform.runLater(action);
     }
 
     private void editSubject(LectureLibrary.Subject item) {
